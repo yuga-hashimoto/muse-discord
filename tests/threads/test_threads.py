@@ -70,6 +70,12 @@ class ThreadReplies(unittest.TestCase):
         self.assertEqual(info["parent_id"], CH)
         self.assertEqual(info["guild_id"], G1)
         self.assertTrue(info["can_send"])
+        # Read from its start: a person answering in the thread before the
+        # poll first reads it is not skipped as history.
+        self.assertIn(tid, mod._NEW_THREADS)
+        st = mod.load_state()
+        mod.seed_channel_seen(tid, "general > hello there", st)
+        self.assertEqual(st["last_seen"][tid], str(int(tid) - 1))
 
     def test_off_by_default_replies_in_the_channel(self):
         mod = load()
