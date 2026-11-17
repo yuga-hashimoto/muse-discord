@@ -58,6 +58,7 @@ CHANNEL_SHORT = {"replies": "who.replies", "notes": "style.notes"}
 ENGINE_KEYS = {
     "rest_poll_seconds": None, "discovery_refresh_minutes": None,
     "coalesce_seconds": None, "max_reply_chars": None, "guild_ids": None,
+    "thread_replies": None,
     "sweep": {"every_cycles", "grace_seconds", "max_age_hours",
               "max_recoveries"},
     "backoff": {"initial_seconds", "max_seconds"},

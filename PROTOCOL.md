@@ -1328,6 +1328,7 @@ and backoff); 0 is honoured where it means something.
 | `engine.backoff.max_seconds` | same | 900 | Longest backoff |
 | `engine.coalesce_seconds` | `behavior.coalesce_seconds` | 5 | Longest wait to fold a burst into one item (0: none) |
 | `engine.max_reply_chars` | `behavior.max_reply_chars` | 1800 | Ceiling on one reply, 1-2000 (clamped) |
+| `engine.thread_replies` | same | off | Answer in a thread under the message replied to (guild text channels only; DMs and threads stay inline). Needs Create Public Threads; a refusal falls back to replying in the channel |
 | `engine.guild_ids` | `bot.guild_ids` | `[]` | Only these servers; empty: every server |
 
 ### Old settings

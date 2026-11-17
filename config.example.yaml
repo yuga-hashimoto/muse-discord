@@ -149,3 +149,10 @@ all_servers:
 # Advanced engine settings (polling, timing, the reply size ceiling)
 # are listed in PROTOCOL.md under "Engine settings". Most installs
 # never need them.
+engine:
+  thread_replies: on      # answer in a thread under the message, so the
+                          # channel stays clean and the conversation moves
+                          # into the thread: on or off. Needs the bot's
+                          # Create Public Threads permission; DMs and
+                          # threads it is already in stay as they are.
+                          # off = reply in the channel, as before.

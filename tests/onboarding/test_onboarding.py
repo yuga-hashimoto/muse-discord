@@ -208,7 +208,7 @@ class ConnectDiscord(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(out["owner_id"], OWNER_ID)
         self.assertIn(f"client_id={APP_ID}", out["invite_url"])
-        self.assertIn("permissions=2252074691710016", out["invite_url"])
+        self.assertIn("permissions=2252109051448384", out["invite_url"])
         self.assertIn("integration_type=0", out["invite_url"])
         # The intent was turned on through the API, and checked.
         patches = [b for m, p, b, _a in self.fake.requests if m == "PATCH"]

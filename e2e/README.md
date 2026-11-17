@@ -123,7 +123,7 @@ one after it) or a step restarts it.
      (the invite `bin/connect-discord.py` prints: View Channel, Send
      Messages, Send Messages in Threads, Read Message History, Attach
      Files, Embed Links, Add Reactions, Pin Messages):
-     `https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=2252074691710016`
+     `https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=2252109051448384`
      (this already includes Send Messages in Threads, so it can answer
      in the threads the scenarios start)
    - `driver-a`: View Channel, Send Messages, Read Message History,

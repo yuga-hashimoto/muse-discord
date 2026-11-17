@@ -286,6 +286,27 @@ def _cfg_num(section, key, default, cast, name, minimum=None,
     return val
 
 
+_ON_OFF = {"on": True, "true": True, "yes": True, "1": True,
+           "off": False, "false": False, "no": False, "0": False}
+
+
+def _cfg_onoff(section, key, default, name):
+    """Resolve one on/off setting (on/off, true/false, 1/0; a YAML on/off
+    is already a bool). Anything else means the default, with a warning
+    printed once, here at import."""
+    raw = section.get(key)
+    if raw is None:
+        return bool(default)
+    if isinstance(raw, bool):
+        return raw
+    val = _ON_OFF.get(str(raw).strip().lower())
+    if val is None:
+        print(f"WARNING: config {name}={raw!r} is not on or off; using "
+              f"the default {'on' if default else 'off'}.", flush=True)
+        return bool(default)
+    return val
+
+
 # --- Read once at import: identity and engine internals ---
 OWNER_USER_IDS = set(_S0.owners)
 GUILD_ALLOWLIST = set(_S0.guild_ids())
@@ -370,6 +391,15 @@ CHANNEL_REFRESH_CYCLES = max(
     1, round(_cfg_num(_ENGINE, "discovery_refresh_minutes", 30, float,
                       "engine.discovery_refresh_minutes", minimum=1) * 60
              / POLL_INTERVAL))
+
+# Answer in a thread under the message replied to, instead of inline in
+# the channel (see reply_thread). Off unless asked for: a thread changes
+# where a conversation lives, and the bot needs Create Public Threads.
+THREAD_REPLIES = _cfg_onoff(_ENGINE, "thread_replies", False,
+                            f"{_ENG}.thread_replies")
+# Discord's limits: a thread's name, and one of its four archive delays.
+THREAD_NAME_CHARS = 100
+THREAD_ARCHIVE_MINUTES = 1440
 
 
 def _load_token():
@@ -4616,13 +4646,115 @@ def normalize_parts(item):
     return out
 
 
+# ---------------------------------------------------------------------------
+# Thread replies (engine.thread_replies). A reply can live in a thread of
+# its own, under the message it answers, instead of in the channel: the
+# conversation moves there and the channel stays clean. Discord allows one
+# thread per message, so the thread is created once and cached — the rest
+# of the burst, and a retry, find the same one.
+# ---------------------------------------------------------------------------
+_REPLY_THREADS = {}       # channel id -> {message id: thread id}
+_REPLY_THREADS_MAX = 500  # channels remembered (a cache: the oldest go first)
+_REPLY_THREADS_PER_CHANNEL = 200
+_NO_THREAD_PERM = set()   # channels Discord refused to start a thread in
+
+
+def reply_thread_name(text):
+    """A thread's name from the text it answers: one line, at most
+    Discord's 100 characters, never empty."""
+    name = " ".join(str(text or "").split())
+    if len(name) > THREAD_NAME_CHARS:
+        name = name[:THREAD_NAME_CHARS - 1].rstrip() + "…"
+    return name or "Thread"
+
+
+def reply_thread(channel_id, message_id, name_hint=""):
+    """The thread a reply to message_id belongs in, or None to reply in
+    the channel.
+
+    None when thread replies are off, for a DM (no threads there), in a
+    thread already (a thread has no threads), for a message id that is
+    not one, and whenever Discord refuses: no Create Public Threads
+    permission (403), a thread that cannot be read back (400), any other
+    failure. A thread never costs the reply; it goes inline instead.
+
+    The thread is created under the message the first time and cached,
+    so a retried reply finds the same one (a second thread on one message
+    is a 400). It is added to CHANNELS, so the poll — and not only the
+    gateway — starts reading it at once, and the conversation continues
+    in the thread.
+    """
+    if not THREAD_REPLIES or not _is_snowflake(message_id):
+        return None
+    info = CHANNELS.get(channel_id) or {}
+    if info.get("thread") or channel_id in _NO_THREAD_PERM:
+        return None
+    if not info.get("guild_id"):
+        return None      # DMs have no threads (and DMs are not monitored)
+    known = _REPLY_THREADS.get(channel_id) or {}
+    if known.get(message_id):
+        return known[message_id]
+    try:
+        th = api_post(
+            f"/channels/{channel_id}/messages/{message_id}/threads",
+            {"name": reply_thread_name(name_hint),
+             "auto_archive_duration": THREAD_ARCHIVE_MINUTES})
+    except Exception as e:
+        code = getattr(e, "code", None)
+        th = None
+        if code == 400:
+            # One is already there: a retry after a restart, or someone
+            # started one first. Discord carries it on the message.
+            try:
+                th = (api_get(f"/channels/{channel_id}/messages/"
+                              f"{message_id}") or {}).get("thread")
+            except Exception:
+                th = None
+        elif code == 403:
+            _NO_THREAD_PERM.add(channel_id)
+            print(f"WARNING: no permission to start a thread in "
+                  f"{channel_display(info)}; replies stay in the channel.",
+                  flush=True)
+        if not (isinstance(th, dict) and _is_snowflake(th.get("id"))):
+            if code not in (400, 403):
+                print(f"Starting a thread in {channel_display(info)} "
+                      f"failed: {e}; replying in the channel instead.",
+                      flush=True)
+            return None
+    if not (isinstance(th, dict) and _is_snowflake(th.get("id"))):
+        return None
+    tid = str(th["id"])
+    name = str(th.get("name") or reply_thread_name(name_hint))
+    known = _REPLY_THREADS.setdefault(channel_id, {})
+    known[message_id] = tid
+    while len(known) > _REPLY_THREADS_PER_CHANNEL:
+        known.pop(next(iter(known)))
+    while len(_REPLY_THREADS) > _REPLY_THREADS_MAX:
+        _REPLY_THREADS.pop(next(iter(_REPLY_THREADS)))
+    CHANNELS.setdefault(tid, {
+        "name": f"{info.get('name', '?')} > {name}",
+        "guild_id": info.get("guild_id"),
+        "guild_name": info.get("guild_name"),
+        "can_send": True, "thread": True, "parent_id": channel_id,
+        "private": False})
+    # Seeded from its start (the thread's id), like a thread discovery
+    # found: a person who answers in the thread before the poll first
+    # reads it is not skipped as history.
+    _NEW_THREADS.add(tid)
+    print(f"Started thread '{name}' in {channel_display(info)} "
+          f"({tid}).", flush=True)
+    return tid
+
+
 def send_fragmented(channel_id, parts, reply_to=None, attachments=(),
-                    mentions=None, nonce_key=None):
+                    mentions=None, nonce_key=None, thread_name=None):
     """Send a reply as sequential messages, like a person thinking aloud.
 
     The first part is threaded under reply_to; follow-ups go out as plain
     messages with a typing beat between them. Attachments ride on the last
-    part. Raises on the first failure; the caller retries the whole
+    part. With engine.thread_replies on, every part lands in a thread
+    under reply_to instead (reply_thread). Raises on the first failure; the
+    caller retries the whole
     reply, and each part's nonce makes Discord return the parts that
     already landed instead of posting them again. mentions: what the
     parts may ping (default SEND_ALLOWED_MENTIONS); nonce_key: what the
@@ -4634,23 +4766,35 @@ def send_fragmented(channel_id, parts, reply_to=None, attachments=(),
     # Every part checked before the first goes out: a secret in part 3
     # never leaves parts 1 and 2 half-sent.
     guard_outgoing({"content": list(parts)}, channel_id)   # and joined
+    # With thread replies on, the whole reply lands in a thread under the
+    # message replied to (reply_thread); inline everywhere else, and
+    # whenever Discord will not make the thread.
+    target, in_thread = channel_id, False
+    if reply_to:
+        tid = reply_thread(channel_id, reply_to, thread_name or parts[0])
+        if tid:
+            target, in_thread = tid, True
     last_idx = len(parts) - 1
     sent = []
     for i, part in enumerate(parts):
         if i > 0:
-            send_typing(channel_id)
+            send_typing(target)
             time.sleep(random.uniform(2.0, 4.0))
+        # Keyed on where the reply belongs, not on the thread it lands in:
+        # a retry finds the same thread (one thread per message), so its
+        # nonces are the ones it sent before.
         nonce = send_nonce(channel_id, nonce_key or reply_to, parts, i)
         kw = {"mentions": mentions} if mentions else {}
+        first_ref = None if in_thread else reply_to
         try:
             if i == last_idx and attachments:
                 got = send_reply_with_files(
-                    channel_id, part, attachments,
-                    reply_to if i == 0 else None, nonce, **kw)
+                    target, part, attachments,
+                    first_ref if i == 0 else None, nonce, **kw)
             elif i == 0:
-                got = send_reply(channel_id, part, reply_to, nonce, **kw)
+                got = send_reply(target, part, first_ref, nonce, **kw)
             else:
-                got = send_reply(channel_id, part, nonce=nonce, **kw)
+                got = send_reply(target, part, nonce=nonce, **kw)
         except Exception as e:
             try:
                 e.failed_part, e.sent_ids = i, list(sent)

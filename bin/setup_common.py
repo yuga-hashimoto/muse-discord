@@ -46,10 +46,11 @@ TIMEOUT = 20
 
 # What the bot asks for in a server: View Channel, Send Messages, Send
 # Messages in Threads, Read Message History, Attach Files, Embed Links,
-# Add Reactions, Pin Messages. No administrator, no moderation.
+# Add Reactions, Pin Messages, and Create Public Threads (thread replies,
+# engine.thread_replies). No administrator, no moderation.
 PERMISSIONS = (1 << 10) | (1 << 11) | (1 << 38) | (1 << 16) | (1 << 15) \
-    | (1 << 14) | (1 << 6) | (1 << 51)
-assert PERMISSIONS == 2252074691710016
+    | (1 << 14) | (1 << 6) | (1 << 51) | (1 << 35)
+assert PERMISSIONS == 2252109051448384
 VIEW_CHANNEL = 1 << 10
 SEND_MESSAGES = 1 << 11
 ADMINISTRATOR = 1 << 3
