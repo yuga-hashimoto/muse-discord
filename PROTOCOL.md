@@ -98,6 +98,10 @@ an item no longer in the queue is refused. Item fields:
 | `media` | Viewable media, downloaded: `[{path, content_type, source}]`; video and GIFs as sampled frames (`source` starts with `video-frame:`) |
 | `documents` | Extracted attachment text: `[{name, content_type, text}]` (truncated) |
 | `unviewable` | Attachments that could not be made viewable |
+| `audio` | Voice notes and audio attachments, downloaded: `[{name, path, content_type}]`; the worker runs `bin/transcribe.py` on each (it is the only file it may open besides the prompt and media) |
+| `links` | Pages a link in the message points at, read by the monitor: `[{url, title, text}]` (text truncated; https only, public addresses only, at most 2 per message) |
+| `summary` | The summary the worker last wrote for this channel (Summaries), else `""` |
+| `thread_ok` | Whether a reply here may live in a thread of its own: `engine.thread_replies`, and the place's `style.threads` |
 | `history` | Up to 8 channel messages before the trigger: `[{id, author, author_id, bot, webhook?, display?, text, ts}]`, text cut to 300 characters |
 | `may_generate` | Generation permission (Generation) |
 | `owner_command` | True only when stamped from an owner's verified id (Owner commands) |
@@ -139,6 +143,8 @@ anything appended meanwhile. Fields:
 | `schedule` | Reminders and watches to add or cancel (The schedule action) |
 | `proactive` | `"opt-out"` or `"opt-in"` ("Stop messaging me") |
 | `remember` | Facts for the Muse's memory, owner DMs only (Owner memory) |
+| `summary` | A few sentences on the conversation, kept per channel for the next run (Summaries) |
+| `thread_title` | A better name for the reply's thread, when one was started |
 
 **Validation.** Each outbox item passes these checks in order; the
 first that fails decides:
@@ -511,6 +517,18 @@ window, so a person can keep talking without mentioning the bot:
   `silent` when it is not for the bot.
 
 `when-addressed` turns the window off; `off` queues nothing there.
+
+### Summaries
+
+The history window on a queue item is short (8 messages, 300 characters
+each). A conversation that runs longer than that loses its beginning, so
+the worker may hand one back: `"summary"` on an outbox item, a few
+sentences on what matters for the next reply. The monitor keeps one per
+channel (`state.json` → `summaries`, at most 1400 characters) and puts it
+on later items as `summary` (the first 600 characters). A summary is
+replaced by the next one, so the worker writes the whole picture, not the
+news. It is stored whatever the item does (a `silent` pass included), and
+only for the item's own channel. `/new` clears it with the history.
 
 ## Unprompted messages
 
@@ -1200,6 +1218,24 @@ unavailable."
   each reason is re-checked against the settings in force, and a fix is
   offered only while the cause holds and the viewer may make it.
 
+### /ask, /new, /status
+
+Three small commands beside `/settings`. The interaction thread answers
+within Discord's 3 seconds and only the main loop touches state, so a
+command that changes something records a request (`_CONTROL`) and the
+loop applies it on its next tick.
+
+- `/ask question:` queues the question as if it had been typed in the
+  channel (`enqueue_message` with the interaction's id standing in for
+  the message id), so `who.allow`, the caps and the injection filter all
+  still apply. The answer posts as an ordinary message (its `reply_to`
+  names no message, so Discord's `fail_if_not_exists: false` turns it
+  into a plain post). Anyone the settings would answer may use it.
+- `/new` forgets the channel's history window and its summary (owners
+  only). Reminders, watches and the Muse's memory are untouched.
+- `/status` reports the queue depth, the outbox, replies sent and passed
+  on, the gateway, uptime and the last worker pickup (owners only).
+
 ### Settings requests
 
 An owner can DM the bot what to change ("only answer in #general when
@@ -1328,7 +1364,10 @@ and backoff); 0 is honoured where it means something.
 | `engine.backoff.max_seconds` | same | 900 | Longest backoff |
 | `engine.coalesce_seconds` | `behavior.coalesce_seconds` | 5 | Longest wait to fold a burst into one item (0: none) |
 | `engine.max_reply_chars` | `behavior.max_reply_chars` | 1800 | Ceiling on one reply, 1-2000 (clamped) |
-| `engine.thread_replies` | same | off | Answer in a thread under the message replied to (guild text channels only; DMs and threads stay inline). Needs Create Public Threads; a refusal falls back to replying in the channel |
+| `engine.thread_replies` | same | off | Answer in a thread under the message replied to (guild text channels only; DMs and threads stay inline, and `style.threads` can keep a place inline). Needs Create Public Threads; a refusal falls back to replying in the channel |
+| `engine.thread_mention` | same | off | Ping the author in the new thread's first message, so the reply is noticed |
+| `engine.ack_reactions` | same | off | 👀 on a queued message, then ✅ (replied), ❌ (given up) or nothing (the worker chose silence) |
+| `engine.transcribe_command` | same | none | Speech-to-text for voice messages, run by the worker through `bin/transcribe.py`: a command using `{file}` |
 | `engine.guild_ids` | `bot.guild_ids` | `[]` | Only these servers; empty: every server |
 
 ### Old settings

@@ -10,6 +10,7 @@ MUT_DIR = the package tree under test.
 Usage: [MUT_DIR=<tree>] python3 tests/threads/test_threads.py"""
 import os
 import sys
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
@@ -171,6 +172,242 @@ class ThreadReplies(unittest.TestCase):
         self.assertNotIn("\n", long)
 
 
+class LinkReading(unittest.TestCase):
+    def test_only_https_and_at_most_two(self):
+        mod = load()
+        self.assertEqual(
+            mod.link_urls("see https://a.example/x, http://b.example and "
+                          "https://c.example/y https://d.example/z"),
+            ["https://a.example/x", "https://c.example/y"])
+
+    def test_a_page_becomes_its_title_and_text(self):
+        mod = load()
+        page = (b"<html><head><title>News</title><style>p{color:red}</style>"
+                b"</head><body><p>Hello <b>world</b></p>"
+                b"<script>bad()</script></body></html>")
+        title, text = mod.link_text_of(page, "text/html")
+        self.assertEqual(title, "News")
+        self.assertIn("Hello world", text)
+        self.assertNotIn("bad()", text)
+        self.assertNotIn("color:red", text)
+
+    def test_a_pdf_is_not_a_page(self):
+        mod = load()
+        self.assertEqual(mod.link_text_of(b"%PDF-1.7", "application/pdf"),
+                         ("", ""))
+
+    def test_the_page_rides_on_the_queue_item(self):
+        mod = load()
+        mid = sf()
+        mod.fetch_link = lambda url: ("A page", "the text on it")
+        mod.note_links({"id": mid, "content": "look: https://example.com/a"})
+        deadline = time.time() + 5
+        while time.time() < deadline and not mod.links_for(mid, wait=0):
+            time.sleep(0.02)
+        self.assertEqual(mod.links_for(mid, wait=0),
+                         [{"url": "https://example.com/a", "title": "A page",
+                           "text": "the text on it"}])
+
+    def test_a_failed_fetch_is_left_out(self):
+        mod = load()
+        mid = sf()
+        mod.fetch_link = lambda url: None
+        mod.note_links({"id": mid, "content": "https://example.com/a"})
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            with mod._LINKS_LOCK:
+                entry = mod._LINKS.get(mid) or {}
+                if all(v is not None for v in entry.get("items", {}).values()):
+                    break
+            time.sleep(0.02)
+        self.assertEqual(mod.links_for(mid, wait=0), [])
+
+
+class VoiceMessages(unittest.TestCase):
+    def test_audio_attachments_are_recognised(self):
+        # (The download itself runs in collect_media, which the harness
+        # stubs out: this covers the decision that routes a file there.)
+        mod = load()
+        self.assertTrue(mod.is_audio_attachment("audio/ogg",
+                                                "https://x/a.ogg"))
+        self.assertTrue(mod.is_audio_attachment("", "https://x/voice.m4a"))
+        self.assertTrue(mod.is_audio_attachment("", "https://x/a.opus?size=1"))
+        self.assertFalse(mod.is_audio_attachment("image/png", "https://x/a.png"))
+        self.assertFalse(mod.is_audio_attachment("", "https://x/a.mp4"))
+
+    def test_voice_notes_are_kept_for_the_queue_item(self):
+        mod = load()
+        mid = sf()
+        mod._remember_audio(mid, [{"name": "a.ogg", "path": "/tmp/a.ogg",
+                                   "content_type": "audio/ogg"}])
+        got = mod.audio_for(mid)
+        self.assertEqual([e["name"] for e in got], ["a.ogg"])
+        self.assertEqual(mod.audio_for(mid), got)   # still there on a retry
+
+    def test_no_audio_is_no_list(self):
+        mod = load()
+        self.assertEqual(mod.audio_for(sf()), [])
+
+
+class Summaries(unittest.TestCase):
+    def test_written_and_read_back(self):
+        mod = load()
+        st = mod.load_state()
+        cid = sf()               # a channel id (ids are snowflakes)
+        self.assertEqual(mod.channel_summary(st, cid), "")
+        mod.store_summary(st, {"channel_id": cid, "reply_to": "5",
+                               "summary": "They ship on Friday."})
+        self.assertEqual(mod.channel_summary(st, cid), "They ship on Friday.")
+        self.assertEqual(len(mod.channel_summary(st, cid)),
+                         len("They ship on Friday."))
+
+    def test_refuses_what_is_not_a_sentence_for_this_channel(self):
+        mod = load()
+        st = mod.load_state()
+        self.assertIsNone(mod.store_summary(st, {"channel_id": CH,
+                                                 "summary": 5}))
+        self.assertIsNone(mod.store_summary(st, {"channel_id": "1/../x",
+                                                 "summary": "hi"}))
+        self.assertIsNone(mod.store_summary(st, {"channel_id": "C1",
+                                                 "summary": ""}))
+        self.assertFalse(st.get("summaries"))
+
+
+class AckReactions(unittest.TestCase):
+    def test_the_marker_is_replaced_once(self):
+        mod = load("engine:\n  ack_reactions: on\n")
+        calls = []
+        mod.add_reaction = lambda cid, mid, e: calls.append(("add", e)) or True
+        mod.remove_reaction = lambda cid, mid, e: calls.append(("del", e)) or True
+        mid = sf()
+        self.assertTrue(mod.ack_start(CH, mid))
+        self.assertFalse(mod.ack_start(CH, mid))       # once
+        self.assertTrue(mod.ack_done(CH, mid, "replied"))
+        self.assertFalse(mod.ack_done(CH, mid, "replied"))  # already settled
+        self.assertEqual([c[0] for c in calls], ["add", "del", "add"])
+        self.assertEqual(calls[-1][1], mod.ACK_DONE)
+
+    def test_silence_only_removes_it(self):
+        mod = load("engine:\n  ack_reactions: on\n")
+        calls = []
+        mod.add_reaction = lambda cid, mid, e: calls.append(("add", e)) or True
+        mod.remove_reaction = lambda cid, mid, e: calls.append(("del", e)) or True
+        mid = sf()
+        mod.ack_start(CH, mid)
+        self.assertTrue(mod.ack_done(CH, mid, "skipped"))
+        self.assertEqual([c[0] for c in calls], ["add", "del"])
+
+    def test_off_by_default(self):
+        mod = load()
+        self.assertFalse(mod.ack_start(CH, sf()))
+
+
+class ThreadPolish(unittest.TestCase):
+    def test_the_thread_starts_with_a_mention(self):
+        mod = load("engine:\n  thread_replies: on\n  thread_mention: on\n")
+        mid, uid = sf(), "111"
+        mod.send_fragmented(CH, ["hello"], mid, ping_user=uid)
+        body = sent(mod)[0][1]
+        self.assertTrue(body["content"].startswith(f"<@{uid}> "))
+        self.assertEqual(body["allowed_mentions"], {"parse": [], "users": [uid]})
+
+    def test_no_mention_when_it_is_off(self):
+        mod = load("engine:\n  thread_replies: on\n")
+        mid = sf()
+        mod.send_fragmented(CH, ["hello"], mid, ping_user="111")
+        self.assertEqual(sent(mod)[0][1]["content"], "hello")
+
+    def test_a_reply_can_stay_in_the_channel(self):
+        mod = load("engine:\n  thread_replies: on\n")
+        mid = sf()
+        mod.send_fragmented(CH, ["hello"], mid, thread_ok=False)
+        self.assertEqual(thread_posts(mod), [])
+        self.assertEqual(sent(mod)[0][0], f"/channels/{CH}/messages")
+
+    def test_renaming_the_thread(self):
+        mod = load("engine:\n  thread_replies: on\n")
+        mid = sf()
+        mod.send_fragmented(CH, ["hello"], mid)
+        tid = only_thread(mod)
+        patched = {}
+        mod.api_patch = lambda path, data: patched.update({path: data}) or {}
+        self.assertTrue(mod.rename_reply_thread(CH, mid, "  a   better\nname "))
+        self.assertEqual(patched, {f"/channels/{tid}":
+                                   {"name": "a better name"}})
+        self.assertEqual(mod.CHANNELS[tid]["name"], "general > a better name")
+
+    def test_renaming_without_a_thread_does_nothing(self):
+        mod = load()
+        patched = {}
+        mod.api_patch = lambda path, data: patched.update({path: data}) or {}
+        self.assertFalse(mod.rename_reply_thread(CH, sf(), "nope"))
+        self.assertEqual(patched, {})
+
+
+class Commands(unittest.TestCase):
+    def ask(self, mod, mid=None, cid=CH, question="hello?"):
+        ix = {"id": mid or sf(), "channel_id": cid,
+              "data": {"options": [{"name": "question", "value": question}]},
+              "member": {"user": {"username": "yu"}}}
+        return ix, mod.on_ask_interaction(ix, "", "111", {})
+
+    def test_options_are_named(self):
+        mod = load()
+        ix, _ = self.ask(mod)
+        self.assertEqual(mod.command_options(ix), {"question": "hello?"})
+
+    def test_ask_answers_at_once_and_records_the_request(self):
+        mod = load()
+        _, resp = self.ask(mod)
+        self.assertEqual(resp["type"], 4)
+        self.assertTrue(resp["data"]["flags"] & 64)     # ephemeral
+        self.assertEqual(len(mod._CONTROL["ask"]), 1)
+
+    def test_ask_becomes_a_queue_item(self):
+        mod = load()
+        st = mod.load_state()
+        st["guild_joined"] = {G1: 0}     # the bot has been here all along
+        mod.CHANNELS = {CH: chan()}
+        ix, _ = self.ask(mod)
+        q = []
+        self.assertEqual(mod.apply_controls(st, q), 1)
+        self.assertEqual(len(q), 1)
+        self.assertEqual(q[0]["content"], "hello?")
+        self.assertEqual(q[0]["message_id"], ix["id"])
+        self.assertEqual(q[0]["channel_id"], CH)
+
+    def test_new_forgets_history_and_summary_only(self):
+        mod = load()
+        st = mod.load_state()
+        st["history"] = {CH: [{"id": "1", "text": "hi"}]}
+        st["summaries"] = {CH: {"text": "old"}}
+        st["replied_to"] = ["9"]
+        resp = mod.on_new_interaction({"id": sf(), "channel_id": CH}, "",
+                                      "111", {})
+        self.assertEqual(resp["type"], 4)
+        self.assertEqual(mod.apply_controls(st, []), 1)
+        self.assertNotIn(CH, st["history"])
+        self.assertNotIn(CH, st["summaries"])
+        self.assertEqual(st["replied_to"], ["9"])
+
+    def test_status_reports_the_numbers(self):
+        mod = load()
+        mod._STATUS.update(queue=2, outbox=1, replied=7, skipped=3,
+                           gateway=True, worker=time.time() - 5)
+        resp = mod.on_status_interaction({}, "", "111", {})
+        text = resp["data"]["content"]
+        for line in ("Queue: 2", "Outbox: 1", "Replies: 7 sent, 3 passed on",
+                     "Gateway: connected"):
+            self.assertIn(line, text)
+
+    def test_a_command_with_options_is_compared_by_its_json(self):
+        mod = load()
+        self.assertFalse(mod._command_differs(dict(mod.ASK_COMMAND),
+                                              mod.ASK_COMMAND))
+        self.assertTrue(mod._command_differs(dict(mod.ASK_COMMAND, options=[]),
+                                             mod.ASK_COMMAND))
+
+
 class TheSetting(unittest.TestCase):
     CFG = """version: 1
 owners: ["111"]
@@ -185,6 +422,23 @@ engine:
         st = MS.load(write(os.path.join(d, "config.yaml"), self.CFG),
                      os.path.join(MUT, "plugins"))
         self.assertTrue(st.engine.get("thread_replies"))
+
+    def test_a_place_can_stay_inline(self):
+        d = tmpdir("cfg_threads_")
+        cfg = self.CFG + f"""servers:
+  "200":                       # a server
+    name: Lounge
+    channels:
+      "300":
+        name: quiet
+        threads: off
+"""
+        st = MS.load(write(os.path.join(d, "config.yaml"), cfg),
+                     os.path.join(MUT, "plugins"))
+        scope = MS.Scope.server("200", "Lounge", "300", None)
+        self.assertFalse(st.resolve(scope)["style.threads"])
+        other = MS.Scope.server("200", "Lounge", "301", None)
+        self.assertTrue(st.resolve(other)["style.threads"])
 
     def test_validate_rejects_a_stranger_next_to_it(self):
         d = tmpdir("cfg_threads_")

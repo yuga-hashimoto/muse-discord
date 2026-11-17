@@ -6,6 +6,27 @@ entries below the releases are pre-release history. **Action
 needed** lists what an existing install must do after updating;
 UPDATING.md walks a Muse through it.
 
+## Unreleased: threads, links, voice messages, summaries, /ask
+
+- Replies can land in a thread under the message they answer
+  (`engine.thread_replies`, and `threads: off` per channel or category to
+  keep one place inline), the thread's first message pings the person
+  (`engine.thread_mention`), and the worker may rename the thread.
+- Links in a message are read by the monitor (https, public addresses,
+  size-capped) and handed to the worker as text; the worker still has no
+  network.
+- Voice messages and audio attachments are downloaded for the worker,
+  which runs `bin/transcribe.py` (`engine.transcribe_command`) on them.
+- The worker may write a short summary back per channel (`"summary"`),
+  handed to the next run when the history window is too short.
+- `engine.ack_reactions`: 👀 on a queued message, then ✅ / ❌.
+- `/ask` (ask without @mentioning), `/new` (owners: forget this channel),
+  `/status` (owners: queue, replies, gateway, uptime).
+
+**Action needed**: an existing install re-invites the bot (the invite now
+asks for Create Public Threads) to use thread replies; voice messages
+need a `transcribe_command` in `config.yaml`.
+
 ## v1.0.0 (2026-10-22): First release
 
 Your Muse in Discord. It:

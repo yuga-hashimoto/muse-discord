@@ -156,3 +156,12 @@ engine:
                           # Create Public Threads permission; DMs and
                           # threads it is already in stay as they are.
                           # off = reply in the channel, as before.
+  thread_mention: on      # ping the person in that thread's first message:
+                          # a new thread is otherwise only an unread badge
+  ack_reactions: on       # put 👀 on a message while it is being answered,
+                          # then ✅ (or ❌ when the reply was given up)
+  transcribe_command: ""  # speech-to-text for voice messages, run by the
+                          # worker: a command using {file}, such as
+                          # "whisper-cli -m /models/ggml-base.bin -f {file}".
+                          # Empty: voice messages cannot be heard, and the
+                          # bot says so.

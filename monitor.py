@@ -42,6 +42,7 @@ import contextlib
 import fcntl
 import hashlib
 import hmac
+from html.parser import HTMLParser
 import importlib.util
 import ipaddress
 import json
@@ -397,6 +398,16 @@ CHANNEL_REFRESH_CYCLES = max(
 # where a conversation lives, and the bot needs Create Public Threads.
 THREAD_REPLIES = _cfg_onoff(_ENGINE, "thread_replies", False,
                             f"{_ENG}.thread_replies")
+# Ping the person whose message the thread starts under: a new thread is
+# otherwise only an unread badge, and the reply goes unnoticed.
+THREAD_MENTION = _cfg_onoff(_ENGINE, "thread_mention", False,
+                            f"{_ENG}.thread_mention")
+# A reaction on a message the moment it is queued (👀), replaced when the
+# reply lands (✅, or ❌ when it was given up): typing lasts 10 seconds, a
+# worker run can take a minute, and "did it see me?" needs an answer.
+ACK_REACTIONS = _cfg_onoff(_ENGINE, "ack_reactions", False,
+                           f"{_ENG}.ack_reactions")
+ACK_SEEN, ACK_DONE, ACK_FAILED = "\N{EYES}", "\N{WHITE HEAVY CHECK MARK}", "\N{CROSS MARK}"
 # Discord's limits: a thread's name, and one of its four archive delays.
 THREAD_NAME_CHARS = 100
 THREAD_ARCHIVE_MINUTES = 1440
@@ -482,6 +493,35 @@ TEXT_EXTS = (".txt", ".md", ".markdown", ".csv", ".json", ".jsonl", ".log",
 PDF_EXTS = (".pdf",)
 DOCX_EXTS = (".docx",)
 PDFTOTEXT_TIMEOUT = 30
+
+# Voice messages: downloaded like documents, but the monitor does not run
+# speech-to-text itself (a Whisper run would stall the main loop for tens
+# of seconds). The file goes to the worker, which runs
+# bin/transcribe.py (engine.transcribe_command) on it, inside its own run.
+MAX_AUDIO_BYTES = 16 * 1024 * 1024
+MAX_AUDIO_PER_MESSAGE = 2
+AUDIO_EXTS = (".ogg", ".oga", ".opus", ".mp3", ".m4a", ".mp4a", ".wav",
+              ".flac", ".aac", ".amr")
+
+# Links in a message are read by the monitor, never by the worker (it has
+# no network): the page's title and readable text ride on the queue item.
+# Only https, only public addresses (each redirect hop re-checked), capped
+# in size, a few URLs per message, and the fetch runs off the main loop.
+URL_RE = re.compile(r"https?://[^\s<>\"'`]+")
+LINK_MAX_PER_MESSAGE = 2
+LINK_MAX_BYTES = 512 * 1024
+LINK_TEXT_CHARS = 1200
+LINK_TITLE_CHARS = 120
+LINK_TIMEOUT_SECS = 6
+LINK_CACHE_SECS = 900
+LINK_MAX_CACHE = 400
+LINK_WORKERS = 2
+
+# A summary the worker writes back for a channel (the outbox's "summary"):
+# what the next run gets when the rolling window is too short to carry the
+# conversation.
+SUMMARY_CHARS = 1400
+SUMMARY_SEEN_CHARS = 600  # how much of it a queue item carries
 
 # Generated media: when the media settings grant permission on a queue
 # item (media_permission), the worker may write generated files into
@@ -2639,6 +2679,49 @@ WHY_COMMAND = {
     # use Why no reply? on the /settings pages anyway).
     "default_member_permissions": "32",
 }
+# ---------------------------------------------------------------------------
+# /ask, /new and /status. Discord fails an interaction that is not answered
+# within 3 seconds, and only the main loop touches state, so a command that
+# changes something records the request here (_CONTROL) and the loop applies
+# it on its next tick; the command answers the person at once.
+# ---------------------------------------------------------------------------
+ASK_COMMAND = {
+    "name": "ask",
+    "type": 1,  # CHAT_INPUT
+    "description": "Ask it something here, without @mentioning it",
+    "contexts": [0, 1],
+    "integration_types": [0],
+    "options": [{
+        "type": 3,  # STRING
+        "name": "question",
+        "description": "What to ask (up to 1500 characters)",
+        "required": True,
+        "max_length": 1500,
+    }],
+}
+NEW_COMMAND = {
+    "name": "new",
+    "type": 1,
+    "description": "Start a fresh conversation here (owners): forget the "
+                   "recent context",
+    "contexts": [0, 1],
+    "integration_types": [0],
+}
+STATUS_COMMAND = {
+    "name": "status",
+    "type": 1,
+    "description": "How the bot is doing: queue, replies, gateway (owners)",
+    "contexts": [0, 1],
+    "integration_types": [0],
+}
+
+_CONTROL = {"reset": [], "ask": []}
+_CONTROL_LOCK = threading.Lock()
+# What /status reports (the main loop keeps it current; the interaction
+# thread only reads it).
+_STATUS = {"queue": 0, "outbox": 0, "replied": 0, "skipped": 0,
+           "gateway": False, "worker": None, "started": time.time()}
+
 ADMIN_DIGEST_SECS = 60
 
 # Directory for SettingsCtx, built on the main loop from discovery and
@@ -3054,6 +3137,68 @@ register_interaction("/" + SETTINGS_COMMAND["name"], on_settings_interaction,
 for _name in WHY_NAMES:
     register_interaction("/" + _name, on_settings_interaction,
                          owner_only=False)
+
+
+def command_options(ix):
+    """A slash command's options as {name: value}."""
+    out = {}
+    for o in (ix.get("data") or {}).get("options") or []:
+        if isinstance(o, dict) and o.get("name") is not None:
+            out[str(o["name"])] = o.get("value")
+    return out
+
+
+def on_ask_interaction(ix, rest, uid, record):
+    """/ask: queue the question as if it had been asked in the channel,
+    so every gate (who.allow, caps, the injection filter) still applies."""
+    question = str(command_options(ix).get("question") or "").strip()
+    cid = str(ix.get("channel_id") or "")
+    if not question or not cid:
+        return ephemeral("Ask me something: /ask question: ...")
+    user = (ix.get("member") or {}).get("user") or ix.get("user") or {}
+    with _CONTROL_LOCK:
+        _CONTROL["ask"].append({
+            "id": str(ix.get("id") or ""), "channel_id": cid,
+            "uid": uid, "name": user.get("username") or "",
+            "question": question[:1500]})
+        while len(_CONTROL["ask"]) > 5:
+            _CONTROL["ask"].pop(0)
+    return ephemeral("On it. I'll answer here.")
+
+
+def on_new_interaction(ix, rest, uid, record):
+    """/new: forget this channel's recent history and summary (the main
+    loop applies it; reminders, watches and memory stay)."""
+    cid = str(ix.get("channel_id") or "")
+    if not cid:
+        return ephemeral("This works in a channel or a DM.")
+    with _CONTROL_LOCK:
+        _CONTROL["reset"].append({"channel_id": cid})
+        while len(_CONTROL["reset"]) > 20:
+            _CONTROL["reset"].pop(0)
+    return ephemeral("Fresh start: I'll forget what we were talking about "
+                     "here. Reminders, watches and what I know about you stay.")
+
+
+def on_status_interaction(ix, rest, uid, record):
+    """/status: the numbers the monitor keeps for it."""
+    s = dict(_STATUS)
+    up = max(0, int(time.time() - float(s.get("started") or time.time())))
+    lines = [f"Queue: {s.get('queue', 0)} waiting",
+             f"Outbox: {s.get('outbox', 0)} to send",
+             f"Replies: {s.get('replied', 0)} sent, {s.get('skipped', 0)} "
+             f"passed on",
+             f"Gateway: {'connected' if s.get('gateway') else 'polling only'}",
+             f"Up: {up // 3600}h {(up % 3600) // 60}m"]
+    if s.get("worker"):
+        lines.append(f"Last worker pickup: {max(0, int(time.time() - s['worker']))}s ago")
+    return ephemeral("\n".join(lines))
+
+
+register_interaction("/" + ASK_COMMAND["name"], on_ask_interaction,
+                     owner_only=False)
+register_interaction("/" + NEW_COMMAND["name"], on_new_interaction)
+register_interaction("/" + STATUS_COMMAND["name"], on_status_interaction)
 
 
 # ---------------------------------------------------------------------------
@@ -3987,30 +4132,43 @@ COMMAND_RETRY_SECS = 60
 
 
 def _command_differs(have, want):
+    """True when Discord's copy of a command differs from ours. Lists are
+    compared regardless of order; an option (a dict) by its JSON, since
+    options are not sortable as dicts."""
+    def canon(value):
+        return sorted(json.dumps(v, sort_keys=True) if isinstance(v, dict)
+                      else v for v in (value or []))
     for k, v in want.items():
         got = have.get(k)
         if isinstance(v, list):
-            got = sorted(got) if isinstance(got, list) else got
-            v = sorted(v)
+            got, v = canon(got), canon(v)
         if got != v:
             return True
-    return bool(have.get("options"))
+    return bool(have.get("options")) and not want.get("options")
 
 
 def ensure_settings_command(app_id):
-    """Make the global /settings command match SETTINGS_COMMAND, and the
-    "Why no reply?" message command WHY_COMMAND. Returns "created",
-    "updated" or "unchanged" (the first that applies: /settings, then
-    the message command); raises on failure."""
+    """Make the global commands match their definitions: /settings, the
+    "Why no reply?" message command, and /ask, /new and /status. Returns
+    "created", "updated" or "unchanged" (the first that applies, in that
+    order); raises on failure."""
     base = f"/applications/{urllib.parse.quote(str(app_id), safe='')}" \
         "/commands"
     have = api_get(base)
     if not isinstance(have, list):
         raise ValueError(f"unexpected command list: {str(have)[:80]}")
-    r1 = _ensure_command(base, have, SETTINGS_COMMAND,
-                         (SETTINGS_COMMAND["name"],))
-    r2 = _ensure_command(base, have, WHY_COMMAND, WHY_NAMES)
-    return r1 if r1 != "unchanged" else r2
+    # Every one, in this pass: a created command must not hide the next
+    # one (registration is attempted once per run of the monitor).
+    results = [_ensure_command(base, have, command, names)
+               for command, names in (
+                   (SETTINGS_COMMAND, (SETTINGS_COMMAND["name"],)),
+                   (WHY_COMMAND, WHY_NAMES),
+                   (ASK_COMMAND, (ASK_COMMAND["name"],)),
+                   (NEW_COMMAND, (NEW_COMMAND["name"],)),
+                   (STATUS_COMMAND, (STATUS_COMMAND["name"],)))]
+    if "created" in results:
+        return "created"
+    return "updated" if "updated" in results else "unchanged"
 
 
 def _ensure_command(base, have, want, names):
@@ -4607,6 +4765,62 @@ def add_reaction(channel_id, message_id, emoji):
         return False
 
 
+def remove_reaction(channel_id, message_id, emoji):
+    """Remove the bot's own reaction from a message (DELETE .../@me)."""
+    encoded = urllib.parse.quote(emoji, safe="")
+    try:
+        req = urllib.request.Request(
+            API + f"/channels/{channel_id}/messages/{message_id}"
+                 f"/reactions/{encoded}/@me",
+            headers=headers(), method="DELETE")
+        with urllib.request.urlopen(req, timeout=20):
+            pass
+        return True
+    except Exception as e:
+        print(f"Removing reaction {emoji!r} failed on {message_id}: {e}",
+              flush=True)
+        return False
+
+
+# Messages this process marked with ACK_SEEN (id -> channel id), so the
+# replacement only touches its own reactions, and only once.
+_ACKED = {}
+_ACK_LOCK = threading.Lock()
+ACK_MAX_TRACKED = 300
+
+
+def ack_start(channel_id, message_id):
+    """Mark a queued message as being answered (ACK_SEEN). Best effort:
+    a missing reaction permission only logs."""
+    if not ACK_REACTIONS or not _is_snowflake(message_id):
+        return False
+    with _ACK_LOCK:
+        if message_id in _ACKED:
+            return False
+        _ACKED[message_id] = channel_id
+        while len(_ACKED) > ACK_MAX_TRACKED:
+            _ACKED.pop(next(iter(_ACKED)), None)
+    return add_reaction(channel_id, message_id, ACK_SEEN)
+
+
+def ack_done(channel_id, message_id, status):
+    """Replace the ack reaction once the item is settled: ACK_DONE when a
+    reply landed, nothing when the worker chose silence, ACK_FAILED when it
+    was given up."""
+    if not ACK_REACTIONS or not message_id:
+        return False
+    with _ACK_LOCK:
+        if _ACKED.pop(str(message_id), None) is None:
+            return False
+    if not remove_reaction(channel_id, message_id, ACK_SEEN):
+        return False
+    if status == "replied":
+        return add_reaction(channel_id, message_id, ACK_DONE)
+    if status == "skipped":
+        return True
+    return add_reaction(channel_id, message_id, ACK_FAILED)
+
+
 def sanitize_reply(text):
     """Apply output guardrails to a drafted reply."""
     text = (text or "").strip()[:MAX_REPLY_CHARS]
@@ -4746,14 +4960,40 @@ def reply_thread(channel_id, message_id, name_hint=""):
     return tid
 
 
+def rename_reply_thread(channel_id, message_id, title):
+    """Give the thread a reply went into a better name (the worker's
+    "thread_title"), when one was created for that message. Discord's
+    name limits apply; a failure only logs."""
+    title = " ".join(str(title or "").split())
+    if not title:
+        return False
+    tid = (_REPLY_THREADS.get(channel_id) or {}).get(str(message_id))
+    if not tid:
+        return False          # inline reply: there is no thread to name
+    name = reply_thread_name(title)
+    try:
+        api_patch(f"/channels/{tid}", {"name": name})
+    except Exception as e:
+        print(f"Renaming thread {tid} failed: {e}", flush=True)
+        return False
+    if tid in CHANNELS:
+        parent = (CHANNELS.get(channel_id) or {}).get("name", "?")
+        CHANNELS[tid]["name"] = f"{parent} > {name}"
+    print(f"Renamed thread {tid} to '{name}'.", flush=True)
+    return True
+
+
 def send_fragmented(channel_id, parts, reply_to=None, attachments=(),
-                    mentions=None, nonce_key=None, thread_name=None):
+                    mentions=None, nonce_key=None, thread_name=None,
+                    ping_user=None, thread_ok=True):
     """Send a reply as sequential messages, like a person thinking aloud.
 
     The first part is threaded under reply_to; follow-ups go out as plain
     messages with a typing beat between them. Attachments ride on the last
-    part. With engine.thread_replies on, every part lands in a thread
-    under reply_to instead (reply_thread). Raises on the first failure; the
+    part. With engine.thread_replies on (and thread_ok), every part lands
+    in a thread under reply_to instead (reply_thread); ping_user gets
+    mentioned in the thread's first message (engine.thread_mention).
+    Raises on the first failure; the
     caller retries the whole
     reply, and each part's nonce makes Discord return the parts that
     already landed instead of posting them again. mentions: what the
@@ -4770,10 +5010,15 @@ def send_fragmented(channel_id, parts, reply_to=None, attachments=(),
     # message replied to (reply_thread); inline everywhere else, and
     # whenever Discord will not make the thread.
     target, in_thread = channel_id, False
-    if reply_to:
+    if reply_to and thread_ok:
         tid = reply_thread(channel_id, reply_to, thread_name or parts[0])
         if tid:
             target, in_thread = tid, True
+    if in_thread and ping_user and THREAD_MENTION:
+        # The thread is new: without this the person only sees an unread
+        # badge. Only they may be pinged, never @everyone or a role.
+        parts = ["<@%s> %s" % (ping_user, parts[0])] + list(parts[1:])
+        mentions = {"parse": [], "users": [str(ping_user)]}
     last_idx = len(parts) - 1
     sent = []
     for i, part in enumerate(parts):
@@ -5079,7 +5324,7 @@ def _gen_approval(state, item_id):
     return a
 
 
-def _fetch_complete(url, max_bytes, timeout, kind):
+def _fetch_complete(url, max_bytes, timeout, kind, any_host=False):
     """Fetch a URL, returning (body_bytes, content_type), or (None, None).
 
     This network's egress proxy intermittently truncates HTTP/1.1 response
@@ -5105,7 +5350,7 @@ def _fetch_complete(url, max_bytes, timeout, kind):
     hop = url
     try:
         for _ in range(FETCH_MAX_REDIRECTS + 1):
-            addrs = _fetch_addrs(hop)
+            addrs = _fetch_addrs(hop, any_host)
             if not addrs:
                 print("Refusing %s download from %s: not https, not an "
                       "allowlisted media host, or not a public address" %
@@ -5148,9 +5393,10 @@ def _fetch_complete(url, max_bytes, timeout, kind):
         print("curl %s download failed: %s" % (kind, e), flush=True)
     # Path 2: urllib with length verification + Range resume. HTTP errors
     # raise; redirects go through _FetchRedirectHandler's checks.
-    if not _fetch_addrs(url):
+    if not _fetch_addrs(url, any_host):
         return None, None
-    opener = urllib.request.build_opener(_FetchRedirectHandler)
+    opener = urllib.request.build_opener(
+        type("_LinksRedirect", (_FetchRedirectHandler,), {"any_host": any_host}))
     data = bytearray()
     expected = None
     ctype = ""
@@ -5193,10 +5439,179 @@ def _fetch_complete(url, max_bytes, timeout, kind):
     return bytes(data), ctype
 
 
+# ---------------------------------------------------------------------------
+# Link reading. A message's links are fetched here, never by the worker:
+# it has no network, and a page a stranger picked must not become a
+# request from the worker's own run. What comes back is text, so it goes
+# through the same injection pre-filter as a document.
+# ---------------------------------------------------------------------------
+class _LinkText(HTMLParser):
+    """A page's title and readable text: no scripts, styles, or markup."""
+
+    SKIP = {"script", "style", "noscript", "template", "svg", "head"}
+    BREAK = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5",
+             "section", "article", "blockquote", "pre"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.title = ""
+        self.chunks = []
+        self._skip = 0
+        self._in_title = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "title":
+            self._in_title = True
+        elif tag in self.SKIP:
+            self._skip += 1
+        elif tag in self.BREAK:
+            self.chunks.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag == "title":
+            self._in_title = False
+        elif tag in self.SKIP and self._skip:
+            self._skip -= 1
+
+    def handle_data(self, data):
+        if self._in_title:
+            self.title += data
+            return
+        if self._skip:
+            return
+        text = " ".join(data.split())
+        if text:
+            self.chunks.append(text + " ")
+
+
+def link_urls(text):
+    """The https URLs in a message, deduped, at most LINK_MAX_PER_MESSAGE
+    (http: refused: a page fetched on the bot's behalf is https only)."""
+    seen, out = set(), []
+    for raw in URL_RE.findall(text or ""):
+        url = raw.rstrip(".,;:!?)]}»”’")
+        if not url.startswith("https://") or url in seen:
+            continue
+        seen.add(url)
+        out.append(url)
+        if len(out) >= LINK_MAX_PER_MESSAGE:
+            break
+    return out
+
+
+def link_text_of(data, ctype):
+    """(title, text) from a fetched page: HTML as readable text, plain
+    text as is, anything else (a PDF, an image) as nothing."""
+    ctype = (ctype or "").lower()
+    if ctype and not (ctype.startswith("text/") or "html" in ctype
+                      or "json" in ctype or "xml" in ctype):
+        return "", ""
+    body = data.decode("utf-8", errors="replace")
+    title, text = "", body
+    if "html" in ctype or body.lstrip()[:1] == "<":
+        parser = _LinkText()
+        try:
+            parser.feed(body)
+        except Exception:
+            return "", ""
+        title, text = parser.title, "".join(parser.chunks)
+    return (" ".join(title.split())[:LINK_TITLE_CHARS],
+            " ".join(text.split())[:LINK_TEXT_CHARS])
+
+
+def fetch_link(url):
+    """(title, text) for a URL, or None. https only, each hop's addresses
+    checked, size-capped, and never the bot token (_fetch_complete)."""
+    try:
+        data, ctype = _fetch_complete(url, LINK_MAX_BYTES, LINK_TIMEOUT_SECS,
+                                      "link", any_host=True)
+    except Exception:
+        return None
+    if not data:
+        return None
+    title, text = link_text_of(data, ctype)
+    return (title, text) if (title or text) else None
+
+
+_LINKS = {}                # message id -> {"urls", "at", "items": {url: page}}
+_LINKS_LOCK = threading.Lock()
+_LINK_SLOTS = threading.Semaphore(LINK_WORKERS)
+
+
+def _link_fetch(url, entry):
+    """One background fetch: fills entry["items"][url] (None = pending)."""
+    with _LINK_SLOTS:
+        got = fetch_link(url)
+    with _LINKS_LOCK:
+        entry["items"][url] = ({"url": url, "title": got[0], "text": got[1]}
+                               if got else {"url": url, "error": True})
+        entry["at"] = time.time()
+
+
+def note_links(msg):
+    """Start reading a message's links, once. Never blocks: the fetches run
+    on daemon threads (LINK_WORKERS at a time), and a burst waits seconds
+    before it is queued, so the text is usually there by then."""
+    mid = str(msg.get("id") or "")
+    if not mid or rest_backing_off():
+        return []
+    urls = link_urls(msg.get("content") or "")
+    if not urls:
+        return []
+    with _LINKS_LOCK:
+        entry = _LINKS.get(mid)
+        if entry is not None:
+            fresh = [u for u in urls if u not in entry["urls"]]
+            if not fresh:
+                return []
+            entry["urls"] += fresh
+        else:
+            entry = {"urls": list(urls), "at": time.time(), "items": {}}
+            _LINKS[mid] = entry
+            stale = [k for k, v in _LINKS.items()
+                     if time.time() - v["at"] > LINK_CACHE_SECS]
+            for k in stale[:50]:
+                _LINKS.pop(k, None)
+            while len(_LINKS) > LINK_MAX_CACHE:
+                _LINKS.pop(next(iter(_LINKS)), None)
+        todo = [u for u in urls if u not in entry["items"]]
+        for url in todo:
+            entry["items"][url] = None      # pending
+    for url in todo:
+        threading.Thread(target=_link_fetch, args=(url, entry), daemon=True,
+                         name="link-fetch").start()
+    return todo
+
+
+def links_for(mid, wait=0.6):
+    """The pages read for a message, as [{"url", "title", "text"}], giving
+    fetches still running a moment (a burst waits seconds anyway). A page
+    that failed, or was not text, is left out."""
+    with _LINKS_LOCK:
+        entry = _LINKS.get(str(mid))
+    if not entry:
+        return []
+    deadline = time.time() + wait
+    while True:
+        with _LINKS_LOCK:
+            pending = [u for u, v in entry["items"].items() if v is None]
+        if not pending or time.time() >= deadline:
+            break
+        time.sleep(0.05)
+    with _LINKS_LOCK:
+        pages = [v for v in entry["items"].values() if isinstance(v, dict)]
+    out = [{"url": v["url"], "title": v.get("title") or "",
+            "text": v.get("text") or ""}
+           for v in pages
+           if not v.get("error") and (v.get("title") or v.get("text"))]
+    return out[:LINK_MAX_PER_MESSAGE]
+
+
 # kind -> (size cap, timeout, the content type it must have: "" = any).
 DOWNLOADS = {"image": (MAX_MEDIA_BYTES, 20, "image/"),
              "video": (MAX_VIDEO_BYTES, 60, "video/"),
-             "document": (MAX_DOC_BYTES, 20, "")}
+             "document": (MAX_DOC_BYTES, 20, ""),
+             "audio": (MAX_AUDIO_BYTES, 60, "")}
 
 
 def download(kind, url, dest_path):
@@ -5318,9 +5733,10 @@ def embed_host_allowed(url):
                for s in EMBED_MEDIA_HOST_SUFFIXES)
 
 
-def _fetch_addrs(url):
+def _fetch_addrs(url, any_host=False):
     """The addresses a media fetch of url may connect to, or None when it
-    must not be fetched at all: not https, not an allowlisted media host,
+    must not be fetched at all: not https, not an allowlisted media host
+    (unless any_host: link reading, where any public host is allowed),
     unresolvable, or resolving to ANY non-public address (private,
     loopback, link-local such as 169.254.169.254, reserved, multicast)."""
     try:
@@ -5328,7 +5744,7 @@ def _fetch_addrs(url):
         port = p.port or 443
     except ValueError:
         return None
-    if p.scheme != "https" or not embed_host_allowed(url):
+    if p.scheme != "https" or not (any_host or embed_host_allowed(url)):
         return None
     try:
         infos = socket.getaddrinfo(p.hostname, port,
@@ -5350,28 +5766,41 @@ def _fetch_addrs(url):
 
 class _FetchRedirectHandler(urllib.request.HTTPRedirectHandler):
     """urllib's side of _fetch_complete's redirect policy: at most
-    FETCH_MAX_REDIRECTS hops, each to a URL that passes _fetch_addrs."""
+    FETCH_MAX_REDIRECTS hops, each to a URL that passes _fetch_addrs
+    (any_host: link reading's wider rule)."""
     max_redirections = FETCH_MAX_REDIRECTS
+    any_host = False
 
     def redirect_request(self, req, fp, code, msg, hdrs, newurl):
-        if not _fetch_addrs(newurl):
+        if not _fetch_addrs(newurl, self.any_host):
             raise urllib.error.HTTPError(
                 newurl, code, "redirect to a disallowed URL", hdrs, fp)
         return super().redirect_request(req, fp, code, msg, hdrs, newurl)
 
 
+def is_audio_attachment(ctype, base):
+    """True for a voice note or audio attachment: its content type, or the
+    extension in its URL (a query string is ignored)."""
+    base = (base or "").split("?")[0]
+    return (ctype or "").startswith("audio/") or base.endswith(AUDIO_EXTS)
+
+
 def collect_media(msg):
     """Download viewable media (images/GIFs) from a message's attachments
-    and GIF embeds, and extract text from document attachments (txt, pdf,
-    docx, ...). Returns (media, documents, unviewable): media is a list of
-    {"path", "content_type", "source"} dicts (video attachments become
-    sampled frames with source "video-frame:<name>"); documents is a list
-    of {"name", "content_type", "text"} dicts with extracted text inlined
-    (truncated); unviewable lists skipped files so the worker can be honest
-    about limits."""
+    and GIF embeds, extract text from document attachments (txt, pdf,
+    docx, ...), and save voice messages for transcription. Returns
+    (media, documents, audio, unviewable): media is a list of {"path",
+    "content_type", "source"} dicts (video attachments become sampled
+    frames with source "video-frame:<name>"); documents is a list of
+    {"name", "content_type", "text"} dicts with extracted text inlined
+    (truncated); audio is a list of {"name", "path", "content_type"} dicts
+    the worker transcribes itself (bin/transcribe.py; the monitor never
+    blocks on speech-to-text); unviewable lists skipped files so the worker
+    can be honest about limits."""
     os.makedirs(MEDIA_DIR, exist_ok=True)
-    media, documents, unviewable = [], [], []
+    media, documents, audio, unviewable = [], [], [], []
     candidates, video_candidates, doc_candidates = [], [], []
+    audio_candidates = []
     for att in msg.get("attachments", []):
         url = att.get("url")
         if not url:
@@ -5383,6 +5812,8 @@ def collect_media(msg):
             candidates.append((url, "attachment:" + name))
         elif ctype.startswith("video/") or base.endswith(VIDEO_EXTS):
             video_candidates.append((url, name))
+        elif is_audio_attachment(ctype, base):
+            audio_candidates.append((url, name, base))
         elif (ctype.startswith("text/") or base.endswith(TEXT_EXTS)
                 or ctype == "application/pdf" or base.endswith(PDF_EXTS)
                 or "wordprocessingml" in ctype or base.endswith(DOCX_EXTS)
@@ -5461,6 +5892,27 @@ def collect_media(msg):
         else:
             unviewable.append(name + " (document: could not extract text)")
 
+    for url, name, base in audio_candidates:
+        if len(audio) >= MAX_AUDIO_PER_MESSAGE:
+            break
+        # The extension is ours, not the uploader's: the worker only ever
+        # gets a plain path under the package's media directory.
+        ext = next((e for e in AUDIO_EXTS if base.endswith(e)), ".ogg")
+        dest = os.path.join(MEDIA_DIR, "%s_%d%s" % (msg["id"], len(audio), ext))
+        try:
+            got_ctype = download("audio", url, dest)
+        except Exception as e:
+            print("Audio download failed (%s): %s" % (name, e), flush=True)
+            continue
+        if not got_ctype:
+            unviewable.append(name + " (audio: download failed or too large)")
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+            continue
+        audio.append({"name": name, "path": dest, "content_type": got_ctype})
+
     seen = set()
     for url, label in candidates:
         if len(media) >= MAX_MEDIA_PER_MESSAGE:
@@ -5484,7 +5936,28 @@ def collect_media(msg):
                 os.rename(dest, final)
                 media.append({"path": final, "content_type": ctype, "source": label})
                 break
+    if audio:
+        _remember_audio(msg["id"], audio)
     return media, documents, unviewable
+
+
+_AUDIO = {}                # message id -> [{"name", "path", "content_type"}]
+_AUDIO_LOCK = threading.Lock()
+
+
+def _remember_audio(mid, entries):
+    """Keep a message's downloaded voice notes for its queue item (bounded:
+    the files themselves are swept with the rest of the media)."""
+    with _AUDIO_LOCK:
+        _AUDIO[str(mid)] = entries
+        while len(_AUDIO) > 200:
+            _AUDIO.pop(next(iter(_AUDIO)), None)
+
+
+def audio_for(mid):
+    """The voice notes downloaded for a message ([] when none)."""
+    with _AUDIO_LOCK:
+        return list(_AUDIO.get(str(mid)) or [])
 
 
 def sweep_media():
@@ -5534,10 +6007,46 @@ def record_history(state, channel_id, messages):
             entry["display"] = display
         hist.append(entry)
         seen_ids.add(m["id"])
+        note_links(m)
     # Sorted: the poll re-reads messages the gateway already recorded,
     # and an old one re-added must not land after newer ones.
     hist.sort(key=lambda h: int(h["id"]))
     state["history"][channel_id] = hist[-HISTORY_PER_CHANNEL:]
+
+
+# ---------------------------------------------------------------------------
+# Conversation summaries. The rolling window (HISTORY_ATTACHED) is short on
+# purpose; a conversation that runs for a while in one channel or thread
+# would lose everything before it. The worker may hand one back (SUMMARIES
+# in its prompt: "summary" on an outbox item), and the next run gets it
+# with the window. Nothing here calls a model: the worker already has the
+# context, so writing the summary is part of its run.
+# ---------------------------------------------------------------------------
+def channel_summary(state, channel_id):
+    """The summary stored for a channel ("" when none)."""
+    entry = (state.get("summaries") or {}).get(str(channel_id)) or {}
+    text = entry.get("text") if isinstance(entry, dict) else ""
+    return str(text or "")[:SUMMARY_SEEN_CHARS]
+
+
+def store_summary(state, item):
+    """Keep the summary a worker wrote for its item's own channel. Returns
+    the stored text, or None when it was not a usable sentence."""
+    text = item.get("summary")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    text = " ".join(text.split())[:SUMMARY_CHARS]
+    channel_id = str(item.get("channel_id") or "")
+    if not _is_snowflake(channel_id):
+        return None
+    store = state.setdefault("summaries", {})
+    store[channel_id] = {"text": text, "at": time.time(),
+                         "through": str(item.get("reply_to") or "")}
+    while len(store) > 500:
+        store.pop(next(iter(store)), None)
+    print(f"Stored a {len(text)}-character summary for channel "
+          f"{channel_id}.", flush=True)
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -6004,13 +6513,18 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         return False
     rate_record(state, author_id, scope)
 
-    # 3. Media and document text, for the worker to see and read.
-    media, documents, unviewable = [], [], []
+    # 3. Media and document text, for the worker to see and read; voice
+    #    notes for the worker to transcribe itself, and the pages a link
+    #    in the burst points at (read by the monitor, which has network).
+    media, documents, unviewable, audio = [], [], [], []
     for m in [msg] + fragments:
         md, dc, uv = collect_media(m)
         media += md
         documents += dc
         unviewable += uv
+        audio += audio_for(m.get("id"))
+    note_links(msg)
+    links = links_for(msg["id"])
 
     # 3b. Whose message the trigger replies to, if anyone's.
     reply_ctx = get_reply_context(msg)
@@ -6023,6 +6537,9 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     if suspicious != "answer":
         extra_texts = [(f"document {d.get('name')}", d.get("text") or "")
                        for d in documents]
+        extra_texts += [(f"linked page {l['url']}",
+                         (l.get("title") or "") + " " + (l.get("text") or ""))
+                        for l in links]
         if reply_ctx and not reply_ctx.get("is_bot"):
             extra_texts.append(("replied-to message",
                                 reply_ctx.get("content") or ""))
@@ -6084,7 +6601,15 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         "media": media,
         "documents": documents,
         "unviewable": unviewable,
+        # Voice notes (the worker runs bin/transcribe.py on each) and the
+        # pages a link in the burst points at.
+        "audio": audio,
+        "links": links,
         "history": history,
+        "summary": channel_summary(state, msg["channel_id"]),
+        # Whether this reply may live in a thread of its own: the engine
+        # switch, and the place's style.threads (a channel can stay inline).
+        "thread_ok": bool(THREAD_REPLIES and here["style.threads"]),
         "may_generate": may_generate,
         "owner_command": owner_command,
         "burst": len(fragments) > 0,
@@ -6150,7 +6675,78 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
                        channel_id=msg.get("channel_id"),
                        author=msg.get("author", {}).get("username"),
                        author_id=author_id)
+    ack_start(msg["channel_id"], msg["id"])
     return True
+
+
+def apply_controls(state, queue):
+    """/new and /ask requests recorded by the interaction thread, applied
+    here (only this loop touches state). Returns how many were applied:
+    the caller writes the queue items they add."""
+    with _CONTROL_LOCK:
+        resets, asks = _CONTROL["reset"], _CONTROL["ask"]
+        _CONTROL["reset"], _CONTROL["ask"] = [], []
+    done = 0
+    for req in resets:
+        cid = str(req.get("channel_id") or "")
+        if not cid:
+            continue
+        (state.get("history") or {}).pop(cid, None)
+        (state.get("summaries") or {}).pop(cid, None)
+        print(f"/new: forgot the context of {cid}.", flush=True)
+        done += 1
+    for req in asks:
+        cid = str(req.get("channel_id") or "")
+        mid = str(req.get("id") or "")
+        if not (cid and _is_snowflake(mid)):
+            continue
+        info = CHANNELS.get(cid) or {}
+        gid = info.get("guild_id")
+        dm = not gid
+        cname = (("DM with " + (req.get("name") or "them")) if dm
+                 else channel_display(info))
+        # A slash command has no message of its own: the interaction's id
+        # stands in for one, so the reply posts normally (message_reference
+        # with fail_if_not_exists: false) and every gate still runs.
+        fake = {
+            "id": mid,
+            "channel_id": cid,
+            "author": {"id": str(req.get("uid") or ""),
+                       "username": req.get("name") or "?",
+                       "bot": False},
+            "content": req["question"],
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
+                                       time.gmtime()),
+            "mentions": [], "attachments": [], "embeds": [], "type": 0,
+        }
+        if gid:
+            fake["guild_id"] = gid
+        # /ask asks; it does not override "don't answer here" or a
+        # who.allow / who.ignore list (the same gate as a mention).
+        here = settings().resolve(scope_for(gid, cid, dm=dm))
+        if here["who.replies"] == "off" or not who_allows(fake, gid, here):
+            print(f"/ask in {cid} refused: the settings do not answer "
+                  f"there.", flush=True)
+            continue
+        try:
+            ok = enqueue_message(fake, cname, state, queue, dm=dm,
+                                 guild_id=gid)
+        except Exception as e:
+            print(f"/ask could not be queued: {type(e).__name__}: {e}",
+                  flush=True)
+            continue
+        if ok:
+            # There is no real message here to start a thread under (the
+            # id is the interaction's): answer in the channel.
+            for it in queue:
+                if it.get("message_id") == mid:
+                    it["thread_ok"] = False
+                    break
+            done += 1
+        else:
+            print("/ask was not queued (a setting or a cap refused it).",
+                  flush=True)
+    return done
 
 
 def note_ingested(state, mid):
@@ -6200,6 +6796,9 @@ def _settle(state, item, status, reason="", replied=False, detail=None):
                        channel_id=item.get("channel_id"),
                        author=item.get("author"),
                        author_id=item.get("author_id"), detail=detail)
+    _STATUS[status] = _STATUS.get(status, 0) + 1
+    if item.get("channel_id"):
+        ack_done(item["channel_id"], trigger, status)
 
 
 def _answered_id(state, item):
@@ -6234,6 +6833,10 @@ def _outbox_problem(item):
                 isinstance(value, list)
                 and all(isinstance(v, str) for v in value)):
             return f"{field} is not a list of strings"
+    for field in ("summary", "thread_title"):
+        value = item.get(field)
+        if value is not None and not isinstance(value, str):
+            return f"{field} is not a string"
     if item.get("_retry") is not None \
             and not isinstance(item["_retry"], dict):
         return "_retry was edited (leave it alone)"
@@ -6688,6 +7291,7 @@ def process_outbox(state):
             and not state.get("released"):
         return
     picked = time.time()
+    _STATUS["worker"] = picked
     with shared_lock():
         fresh = _outbox_load(OUTBOX_FILE)
         if fresh is None:
@@ -6732,6 +7336,11 @@ def process_outbox(state):
             continue
         reply_to = item.get("reply_to")
         qid = _answered_id(state, item)
+        # A summary the worker wrote for this channel: kept whatever else
+        # the item does (a silent pass included), never for another
+        # channel (the item was just bound to this one).
+        if item.get("summary"):
+            store_summary(state, item)
         typing_keys = ["item:" + qid] if qid else []
         # Dedup: never touch the same message twice (overlapping workers)
         if (reply_to and reply_to in state["replied_to"]) \
@@ -6838,7 +7447,14 @@ def process_outbox(state):
                 send_fragmented(item["channel_id"], parts,
                                 None if item.get("standalone") else reply_to,
                                 attachments, mentions=mentions,
-                                nonce_key=fire and f"fire:{fire['id']}")
+                                nonce_key=fire and f"fire:{fire['id']}",
+                                ping_user=item.get("author_id"),
+                                thread_ok=item.get("thread_ok", True))
+                if item.get("thread_title") and reply_to:
+                    # The worker's name for the conversation it started
+                    # (SUMMARIES): only when this reply made a thread.
+                    rename_reply_thread(item["channel_id"], reply_to,
+                                        item["thread_title"])
                 print(f"Sent reply to {item.get('author')} in {item.get('channel_name')} "
                       f"({len(parts)} part(s)): {parts[0][:60]}", flush=True)
             for emoji in reactions:
@@ -9069,9 +9685,13 @@ def main():
             for msg, cname in dm_items:
                 stage_trigger(state, msg, cname, None, "dm", dm=True)
 
+            controls = apply_controls(state, queue)
             dirty = flush_pending(state, queue)
-            if dirty:
+            if dirty or controls:
                 queue_edit(add=queue[n_before:])
+            _STATUS["queue"] = len(queue)
+            _STATUS["gateway"] = bool(BOT_USER_ID)
+            _STATUS["outbox"] = len(_read_json(OUTBOX_FILE, list) or [])
             save_state(state)
         except Exception as e:
             queue = None  # not trustworthy: the sweep must not write it

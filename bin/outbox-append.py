@@ -116,6 +116,10 @@ def problems(item):
             out.append(f"{field} is not a Discord id")
     if item.get("text") is not None and not isinstance(item["text"], str):
         out.append("text is not a string")
+    for field in ("summary", "thread_title"):
+        value = item.get(field)
+        if value is not None and not isinstance(value, str):
+            out.append(f"{field} is not a string")
     for field in ("parts", "reactions", "attachments"):
         value = item.get(field)
         if value is not None and not (

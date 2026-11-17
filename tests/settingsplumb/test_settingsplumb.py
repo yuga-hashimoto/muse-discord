@@ -135,6 +135,21 @@ def why_copy(mod, **over):
     return c
 
 
+def command_copy(mod, command, cid):
+    """Any command as Discord's GET returns it."""
+    c = {"id": cid, "application_id": "777", "version": "5",
+         "contexts": [1, 0], "integration_types": [0]}
+    c.update(command)
+    return c
+
+
+def other_copies(mod, why_name="Why no reply?"):
+    """The commands registered after /settings and Why no reply?"""
+    return [command_copy(mod, mod.ASK_COMMAND, "c3"),
+            command_copy(mod, mod.NEW_COMMAND, "c4"),
+            command_copy(mod, mod.STATUS_COMMAND, "c5")]
+
+
 class Registration(unittest.TestCase):
     def setUp(self):
         self.mod = load_monitor(CFG)
@@ -145,7 +160,9 @@ class Registration(unittest.TestCase):
         return r, out.getvalue()
 
     def test_command_definitions_within_discord_limits(self):
-        for c in (self.mod.SETTINGS_COMMAND, self.mod.WHY_COMMAND):
+        for c in (self.mod.SETTINGS_COMMAND, self.mod.WHY_COMMAND,
+                  self.mod.ASK_COMMAND, self.mod.NEW_COMMAND,
+                  self.mod.STATUS_COMMAND):
             self.assertEqual(c["contexts"], [0, 1])       # servers and DMs
             self.assertEqual(c["integration_types"], [0])
             self.assertNotIn("dm_permission", c)   # deprecated for contexts
@@ -164,9 +181,10 @@ class Registration(unittest.TestCase):
         r, out = self.run_reg()
         self.assertEqual(r, "created")
         posts = [x for x in api.log if x[0] == "POST"]
-        self.assertEqual(len(posts), 2)
-        self.assertEqual(posts[0][2], self.mod.SETTINGS_COMMAND)
-        self.assertEqual(posts[1][2], self.mod.WHY_COMMAND)
+        self.assertEqual(len(posts), 5)
+        self.assertEqual([x[2]["name"] for x in posts],
+                         ["settings", self.mod.WHY_COMMAND["name"],
+                          "ask", "new", "status"])
         # Once per run: later ticks make no request.
         n = len(api.log)
         self.mod._COMMAND_REG["next_try"] = 0
@@ -176,9 +194,9 @@ class Registration(unittest.TestCase):
         # every boot would be rate limited).
         self.mod = load_monitor(CFG)
         api = FakeCommands(self.mod, [discord_copy(self.mod),
-                                      why_copy(self.mod),
-                                      {"id": "x", "name": "other",
-                                       "type": 1}])
+                                      why_copy(self.mod)]
+                           + other_copies(self.mod)
+                           + [{"id": "x", "name": "other", "type": 1}])
         r, out = self.run_reg()
         self.assertEqual(r, "unchanged")
         self.assertEqual([x[0] for x in api.log], ["GET", "GET"])
@@ -194,7 +212,8 @@ class Registration(unittest.TestCase):
             with self.subTest(over or why_over):
                 mod._COMMAND_REG.update(done=False, next_try=0)
                 api = FakeCommands(mod, [discord_copy(mod, **over),
-                                         why_copy(mod, **why_over)])
+                                         why_copy(mod, **why_over)]
+                                   + other_copies(mod))
                 self.assertEqual(self.run_reg()[0], "updated")
                 patches = [x for x in api.log if x[0] == "PATCH"]
                 self.assertEqual(len(patches), 1)
@@ -223,7 +242,8 @@ class Registration(unittest.TestCase):
         # A later run finds it under the fallback name: nothing to do.
         api2 = FakeCommands(self.mod, [discord_copy(self.mod),
                                        why_copy(self.mod,
-                                                name="Why no reply")])
+                                                name="Why no reply")]
+                            + other_copies(self.mod))
         self.mod._COMMAND_REG.update(done=False, next_try=0)
         self.assertEqual(self.run_reg()[0], "unchanged")
         self.assertEqual([x[0] for x in api2.log], ["GET"])

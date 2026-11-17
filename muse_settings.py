@@ -54,11 +54,13 @@ PRESENCE_KINDS = ("watching", "playing", "listening", "streaming",
 _LETTER = {"E": "everywhere", "D": "dms", "A": "all_servers",
            "S": "server", "C": "channel"}
 # Short key names a channel/category entry uses.
-CHANNEL_SHORT = {"replies": "who.replies", "notes": "style.notes"}
+CHANNEL_SHORT = {"replies": "who.replies", "notes": "style.notes",
+                 "threads": "style.threads"}
 ENGINE_KEYS = {
     "rest_poll_seconds": None, "discovery_refresh_minutes": None,
     "coalesce_seconds": None, "max_reply_chars": None, "guild_ids": None,
-    "thread_replies": None,
+    "thread_replies": None, "thread_mention": None,
+    "ack_reactions": None, "transcribe_command": None,
     "sweep": {"every_cycles", "grace_seconds", "max_age_hours",
               "max_recoveries"},
     "backoff": {"initial_seconds", "max_seconds"},
@@ -190,6 +192,9 @@ CORE = {
     "style.length": Spec("choice", "normal", "EDS",
                          values=("brief", "normal", "detailed")),
     "style.notes": Spec("text", "", "EDSC", maxlen=NOTES_MAX),
+    # Answer in a thread under the message (engine.thread_replies has to be
+    # on too): a busy channel can keep replies inline.
+    "style.threads": Spec("on-off", True, "EDSC"),
     "abilities.owner_commands": Spec("on-off", True, "ES"),
     # Who can set reminders and watches (muse_watches.py): owners always
     # can; a list names the others who may.
@@ -962,7 +967,7 @@ def _put_plugin(block, man, key, spec, value):
 # Parsing a new-layout dict into layer values
 # ---------------------------------------------------------------------------
 CHANNEL_ONLY = ("a channel or category may set only replies, notes, "
-                "media.enabled, proactive.enabled and "
+                "threads, media.enabled, proactive.enabled and "
                 "plugins.<plugin>.enabled")
 
 
@@ -3005,6 +3010,7 @@ LABELS = {
     "who.bot_exchange_limit": "Replies in a row to other bots",
     "style.notes": "Instructions for the Muse",
     "style.length": "Reply length",
+    "style.threads": "Answer in a thread",
     "privacy.memory": "What it may say about you",
     "privacy.suspicious": "Possible prompt injection",
     "privacy.never_share": "Never share these phrases",
