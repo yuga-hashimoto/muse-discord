@@ -444,6 +444,14 @@ class FreeReplies(unittest.TestCase):
         self.assertTrue(mod.free_reply(m, "conversational", m["author"],
                                        mod.tstate))
 
+    def test_a_message_for_someone_else_is_not_ours(self):
+        mod = self.threaded()
+        st = mod.tstate
+        m = self.said("T1")
+        m["mentions"] = [{"id": "333"}]
+        mod.record_history(st, "T1", [m])
+        self.assertIsNone(mod.trigger_verdict(m, G1, st)[0])
+
     def test_a_thread_the_bot_never_joined_stays_quiet(self):
         mod = load()
         mod.CHANNELS["T2"] = dict(THREAD_ITEM)
