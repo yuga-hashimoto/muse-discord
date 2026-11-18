@@ -75,7 +75,9 @@ WAKE_TIMEOUT = 240
 PAYLOAD_FIELDS = (
     "message_id", "channel_id", "channel_name", "kind", "author",
     "author_id", "content", "media", "documents", "unviewable", "history",
-    "may_generate", "owner_command", "reply_to", "burst",
+    "links", "audio", "summary", "summaries",
+    "may_generate", "owner_command", "owner_mode", "muse_memory",
+    "public_memory", "thread_ok", "reply_to", "burst",
     "burst_fragments", "from_bot", "bot_turns", "participants",
     "follow_up", "settings", "watches", "reminder", "proactive")
 
