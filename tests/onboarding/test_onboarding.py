@@ -102,9 +102,11 @@ def make_pkg():
     root = scratch("muse-onb-")
     pkg = os.path.join(root, "pkg")
     os.makedirs(pkg)
-    for name in ("muse_settings.py", "config.example.yaml", "persona.md",
+    for name in ("muse_settings.py", "config.example.yaml",
                  "worker-prompt.template.md"):
         shutil.copy2(os.path.join(MUT_DIR, name), pkg)
+    # persona.md is instance-local (removed from the repo): setup creates
+    # it, so there is none to copy in a fresh clone.
     for d in ("bin", "plugins"):
         shutil.copytree(os.path.join(MUT_DIR, d), os.path.join(pkg, d))
     home = os.path.join(root, "home")

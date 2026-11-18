@@ -370,6 +370,8 @@ class Watchdog(unittest.TestCase):
     """Real watchdog.sh runs; the tests run at once (load_tests)."""
 
     def setUp(self):
+        if shutil.which("unshare") is None:
+            self.skipTest("unshare is Linux-only (macOS has none)")
         self.d = tmpdir("wd_")
         self.origin = os.path.join(self.d, "origin.git")
         self.seed = os.path.join(self.d, "seed")

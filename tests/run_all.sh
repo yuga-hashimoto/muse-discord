@@ -52,7 +52,10 @@ all_suites() {
 if [ $# -gt 0 ]; then
   SUITES=("$@")
 else
-  mapfile -t SUITES < <(all_suites)
+  SUITES=()
+  while IFS= read -r _s; do SUITES+=("$_s"); done < <(all_suites)
+  [ ${#SUITES[@]} -gt 0 ] \
+    || { echo "run_all.sh: no test suites found under $TESTS" >&2; exit 2; }
 fi
 
 # Slow suites first, so they overlap with the quick ones.
@@ -94,14 +97,10 @@ run_suite() {
 
 echo "Offline suites against $TREE (${#ordered[@]} suites, $JOBS at a time)"
 t0=$(date +%s)
-running=0
 for s in "${ordered[@]}"; do
-  if [ "$running" -ge "$JOBS" ]; then
-    wait -n
-    running=$((running - 1))
-  fi
+  # Throttle to $JOBS: bash 3.2 has no `wait -n`, so poll the job list.
+  while [ "$(jobs -rp | wc -l)" -ge "${JOBS:-4}" ]; do sleep 0.2; done
   run_suite "$s" &
-  running=$((running + 1))
 done
 wait
 
@@ -122,7 +121,7 @@ for s in "${ordered[@]}"; do
 done
 printf '%-16s %6s %8s\n' total "$total" "$(($(date +%s) - t0))"
 
-for s in "${failed[@]}"; do
+for s in ${failed[@]+"${failed[@]}"}; do
   echo
   echo "######## $s (log)"
   cat "$LOGS/$s.log"

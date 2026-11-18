@@ -292,7 +292,6 @@ TOP = {
     "presence.enabled": Spec("on-off", True, "E", hidden=True,
                              discord_editable=False),
     "updates.notify": Spec("on-off", True, "E"),
-    # Anonymous daily usage counts to the maintainer (telemetry.py).
     # What an owner tells the bot in their DM, added to the Muse's own
     # memory file (monitor.py, remember_facts).
     "memory.save_dms": Spec("on-off", True, "E"),

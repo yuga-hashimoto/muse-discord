@@ -30,7 +30,7 @@ WAIT_SECS="${MUSE_WATCHDOG_HOOK_WAIT:-50}"
 # Proof for bin/doctor.py that this hook runs (never fails the hook).
 touch "$PKG_DIR/.seen-watchdog-hook" 2>/dev/null || true
 
-printf -v stamp '%(%s)T' -1
+stamp=$(date +%s)
 out="$PKG_DIR/watchdog-hook.out.$stamp.$$"
 python3 - "$PKG_DIR" "$out" >/dev/null 2>&1 <<'PYEOF' || true
 import os

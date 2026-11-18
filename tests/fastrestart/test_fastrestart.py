@@ -21,6 +21,10 @@ from common import (FAKEWS, HOOK_RUNTIME as RUNTIME, MUT_DIR,  # noqa: E402
                     copy_watchdog)
 
 if os.environ.get("FR_IN_NS") != "1":
+    if shutil.which("unshare") is None:
+        # No unshare (macOS): nothing to run, and nothing to fake.
+        print("fastrestart: skipped (unshare is Linux-only)")
+        sys.exit(0)
     env = dict(os.environ, FR_IN_NS="1")
     # bash (not python) as PID 1: it reaps the orphaned daemons.
     r = subprocess.run(

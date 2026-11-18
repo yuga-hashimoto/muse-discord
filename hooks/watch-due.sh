@@ -56,7 +56,7 @@ state=$(hook_state_get 2>/dev/null \
     | jq -c 'if type == "object" then . else {} end' 2>/dev/null) \
     || state='{}'
 [ -n "$state" ] || state='{}'
-printf -v now '%(%s)T' -1
+now=$(date +%s)
 leased=$(printf '%s' "$state" | jq -c '.leased // {}' 2>/dev/null) \
     || leased='{}'
 

@@ -64,6 +64,8 @@ _results = {}
 
 
 def setUpModule():
+    if shutil.which("unshare") is None:
+        raise unittest.SkipTest("unshare is Linux-only (macOS has none)")
     with concurrent.futures.ThreadPoolExecutor(len(SCENARIOS)) as pool:
         futs = {name: pool.submit(scenario, steps, **kw)
                 for name, (steps, kw) in SCENARIOS.items()}

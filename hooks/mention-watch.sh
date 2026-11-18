@@ -45,7 +45,7 @@ state=$(hook_state_get 2>/dev/null \
     | jq -c 'if type == "object" then . else {} end' 2>/dev/null) \
     || state='{}'
 [ -n "$state" ] || state='{}'
-printf -v now '%(%s)T' -1
+now=$(date +%s)
 
 # ---- Monitor liveness (zero tokens; see the header) ----
 # Alive when monitor.pid names a live monitor.py (read without touching

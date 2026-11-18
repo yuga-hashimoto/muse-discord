@@ -1,6 +1,6 @@
-"""Review L (PR #53, lean/modules): bin/settings.py and bin/telemetry.py
-were made to "run under .venv like the other tools" through
-setup_common's re-exec. The re-exec compares realpaths, and a .venv made
+"""Review L (PR #53, lean/modules): bin/settings.py was made to
+"run under .venv like the other tools" through setup_common's re-exec.
+The re-exec compares realpaths, and a .venv made
 by bin/install.sh (python3 -m venv: bin/python3 is a symlink to that
 same python3) has the same realpath as the Python that lacks PyYAML, so
 it never re-runs.
@@ -32,7 +32,7 @@ class VenvReexec(unittest.TestCase):
                         os.path.join(pkg, "bin"))
         shutil.copytree(os.path.join(MUT_DIR, "plugins"),
                         os.path.join(pkg, "plugins"))
-        for f in ("muse_settings.py", "telemetry.py"):
+        for f in ("muse_settings.py",):
             shutil.copy(os.path.join(MUT_DIR, f), pkg)
         # .venv as bin/install.sh makes it (python3 -m venv), with the
         # packages (here: the system's) and its .muse-ok marker.
@@ -51,8 +51,7 @@ class VenvReexec(unittest.TestCase):
         with open(cfg, "w") as f:
             f.write(f'version: 1\nowners: ["{OWNER}"]\n'
                     f'token_from: env:MUSE_TEST_TOKEN\n')
-        for tool, args in (("settings.py", ["--config", cfg, "validate"]),
-                           ("telemetry.py", ["--config", cfg, "status"])):
+        for tool, args in (("settings.py", ["--config", cfg, "validate"]),):
             r = subprocess.run(
                 [sys.executable, "-S", os.path.join(pkg, "bin", tool)]
                 + args, capture_output=True, text=True, timeout=60)
