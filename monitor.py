@@ -4474,6 +4474,12 @@ def trigger_verdict(msg, guild_id=None, state=None):
         return None, "who.bots: ignore" if direct else None
     if direct:
         kind = "mention"
+    elif state is not None and replies == "conversational" \
+            and follow_up_open(state, msg):
+        # The follow-up window is open: this is the same conversation the
+        # bot is already in, so it keeps follow-up semantics even in a
+        # thread (where it would otherwise be a free message).
+        kind = "follow_up"
     elif free_reply(msg, replies, author):
         # Nobody was addressed, but this is a conversation the bot is in.
         # A cheap gate decides whether it is worth a wake at all; the
@@ -4481,9 +4487,6 @@ def trigger_verdict(msg, guild_id=None, state=None):
         if not free_wakeable(msg, state, author):
             return None, None
         kind = "free"
-    elif state is not None and replies == "conversational" \
-            and follow_up_open(state, msg):
-        kind = "follow_up"
     else:
         return None, None
     if not who_allows(msg, gid, here):
