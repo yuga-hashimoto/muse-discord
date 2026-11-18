@@ -178,7 +178,8 @@ def check_timezone(text):
 
 CORE = {
     "who.replies": Spec("choice", "conversational", "DASC",
-                        values=("off", "when-addressed", "conversational")),
+                        values=("off", "when-addressed", "conversational",
+                                "free")),
     # A list of user ids = the owners plus those people.
     "who.dms_from": Spec("choice", "owners", "D",
                          values=("owners", "shared-servers", "anyone"),
@@ -3036,6 +3037,7 @@ LABELS = {
 }
 VALUE_LABELS = {
     ("who.replies", "conversational"): "Chatty",
+    ("who.replies", "free"): "Free (it decides)",
     ("who.replies", "when-addressed"): "Only when @mentioned",
     ("who.replies", "off"): "Off",
     ("who.dms_from", "owners"): "Only you",

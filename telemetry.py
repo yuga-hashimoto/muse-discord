@@ -86,8 +86,8 @@ COUNTERS = ("messages_seen", "queued", "replies_sent", "quarantined",
 OS_FAMILIES = ("linux", "darwin", "windows", "freebsd", "openbsd")
 FEATURES = {
     # name: allowed values (anything else is reported as "other")
-    "server_replies": ("off", "when-addressed", "conversational"),
-    "dm_replies": ("off", "when-addressed", "conversational"),
+    "server_replies": ("off", "when-addressed", "conversational", "free"),
+    "dm_replies": ("off", "when-addressed", "conversational", "free"),
     "dms_from": ("owners", "shared-servers", "anyone", "list", "nobody"),
     "memory": ("everything", "public-only", "nothing"),
     "suspicious": ("hold-for-review", "ignore", "answer"),

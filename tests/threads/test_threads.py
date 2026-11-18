@@ -408,6 +408,157 @@ class Commands(unittest.TestCase):
                                              mod.ASK_COMMAND))
 
 
+class FakeSettings:
+    """settings() with one resolved place: enough for trigger_verdict."""
+
+    def __init__(self, replies):
+        self.replies = replies
+
+    def resolve(self, scope):
+        return {"who.replies": self.replies, "who.bots": "when-addressed",
+                "who.allow": "everyone", "who.ignore": []}
+
+
+THREAD_ITEM = {"name": "general > chat", "guild_id": G1, "guild_name": "Srv",
+               "can_send": True, "thread": True, "parent_id": CH}
+
+
+class FreeReplies(unittest.TestCase):
+    def threaded(self):
+        mod = load()
+        mod.CHANNELS["T1"] = dict(THREAD_ITEM)
+        return mod
+
+    def said(self, cid, uid="222", bot=False):
+        return {"id": sf(), "channel_id": cid, "guild_id": G1,
+                "author": {"id": uid, "username": "u", "bot": bot},
+                "content": "and then?", "type": 0}
+
+    def test_a_thread_message_reaches_the_worker(self):
+        mod = self.threaded()
+        m = self.said("T1")
+        self.assertTrue(mod.free_reply(m, "conversational", m["author"]))
+        self.assertEqual(mod.trigger_verdict(m, G1, None)[0], "free")
+
+    def test_when_addressed_keeps_a_thread_quiet(self):
+        mod = self.threaded()
+        m = self.said("T1")
+        self.assertFalse(mod.free_reply(m, "when-addressed", m["author"]))
+        mod.settings = lambda: FakeSettings("when-addressed")
+        self.assertIsNone(mod.trigger_verdict(m, G1, None)[0])
+
+    def test_a_place_can_be_free(self):
+        mod = load()
+        m = self.said(CH)
+        self.assertTrue(mod.free_reply(m, "free", m["author"]))
+        mod.settings = lambda: FakeSettings("free")
+        self.assertEqual(mod.trigger_verdict(m, G1, None)[0], "free")
+
+    def test_a_plain_channel_is_not_free(self):
+        mod = load()
+        m = self.said(CH)
+        self.assertFalse(mod.free_reply(m, "conversational", m["author"]))
+
+    def test_a_forum_post_opening_is_not_free(self):
+        # A post's opening message shares the thread's id: posting is not
+        # talking to the bot, so only the conversation after it is free.
+        mod = self.threaded()
+        m = self.said("T1")
+        m["id"] = "T1"
+        self.assertFalse(mod.free_reply(m, "free", m["author"]))
+        later = self.said("T1")
+        self.assertTrue(mod.free_reply(later, "free", later["author"]))
+
+    def test_another_bot_never_gets_one(self):
+        mod = self.threaded()
+        m = self.said("T1", bot=True)
+        self.assertFalse(mod.free_reply(m, "free", m["author"]))
+
+    def test_the_item_says_free(self):
+        mod = load()
+        st = mod.load_state()
+        st["guild_joined"] = {G1: 0}
+        mod.CHANNELS = {CH: chan()}
+        q = []
+        self.assertTrue(mod.enqueue_message(H.msg(CH, "222", "hello there"),
+                                            "Srv #general", st, q,
+                                            guild_id=G1, kind="free"))
+        self.assertEqual(q[0]["kind"], "free")
+
+    def test_a_mention_still_upgrades_a_open_burst(self):
+        mod = self.threaded()
+        st = mod.load_state()
+        st["guild_joined"] = {G1: 0}
+        first = self.said("T1")
+        mod.stage_trigger(st, first, "Srv general > chat", G1, "free")
+        second = self.said("T1", uid="222")
+        second["mentions"] = [{"id": H.BOT}]
+        mod.stage_trigger(st, second, "Srv general > chat", G1, "mention")
+        entry = list(st["pending"].values())[0]
+        self.assertEqual(entry["kind"], "mention")
+
+
+class SharedMemory(unittest.TestCase):
+    def test_a_thread_and_its_channel_share_the_conversation(self):
+        mod = load()
+        st = mod.load_state()
+        mod.CHANNELS = {CH: chan(), "T1": dict(THREAD_ITEM)}
+        mod.record_history(st, CH, [H.msg(CH, "111", "said in the channel")])
+        mod.record_history(st, "T1", [H.msg("T1", "111", "said in the thread")])
+        # the channel's window carries what was said in the thread
+        self.assertIn("said in the thread",
+                      [h["text"] for h in st["history"][CH]])
+        self.assertIn("via", st["history"][CH][-1])
+        # and a thread's item gets both
+        got = [h["text"] for h in mod.history_window(st, "T1")]
+        self.assertIn("said in the channel", got)
+        self.assertIn("said in the thread", got)
+
+    def test_a_thread_summary_falls_back_to_its_parent(self):
+        mod = load()
+        st = mod.load_state()
+        parent, tid = sf(), sf()      # ids are snowflakes
+        mod.CHANNELS = {parent: chan(),
+                        tid: dict(THREAD_ITEM, parent_id=parent)}
+        mod.store_summary(st, {"channel_id": parent,
+                               "summary": "we ship Friday"})
+        self.assertEqual(mod.channel_summary(st, tid), "we ship Friday")
+        # ...but its own wins
+        mod.store_summary(st, {"channel_id": tid, "summary": "own"})
+        self.assertEqual(mod.channel_summary(st, tid), "own")
+
+    def test_the_memory_file_travels_with_every_item(self):
+        mod = load()
+        path = os.path.join(mod.TMP, "MEMORY.md")
+        with open(path, "w") as f:
+            f.write("Likes tea. Works on a Discord bot.\n")
+        mod.MEMORY_FILE = path
+        mod._MEMORY_TEXT.update(mtime=None, text="")
+        self.assertIn("Likes tea", mod.muse_memory())
+        st = mod.load_state()
+        st["guild_joined"] = {G1: 0}
+        mod.CHANNELS = {CH: chan()}
+        q = []
+        self.assertTrue(mod.enqueue_message(H.msg(CH, "222", "hi"), "Srv #general",
+                                            st, q, guild_id=G1))
+        self.assertIn("Likes tea", q[0]["muse_memory"])
+
+    def test_memory_nothing_leaves_it_out(self):
+        mod = load()
+        path = os.path.join(mod.TMP, "MEMORY.md")
+        with open(path, "w") as f:
+            f.write("Likes tea.\n")
+        mod.MEMORY_FILE = path
+        mod._MEMORY_TEXT.update(mtime=None, text="")
+        st = mod.load_state()
+        st["guild_joined"] = {G1: 0}
+        mod.CHANNELS = {CH: chan()}
+        q = []
+        mod.enqueue_message(H.msg(CH, "222", "hi"), "Srv #general", st, q,
+                            guild_id=G1)
+        self.assertIn("Likes tea", q[0]["muse_memory"])  # default: public-only
+
+
 class TheSetting(unittest.TestCase):
     CFG = """version: 1
 owners: ["111"]

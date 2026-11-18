@@ -23,6 +23,15 @@ UPDATING.md walks a Muse through it.
 - `/ask` (ask without @mentioning), `/new` (owners: forget this channel),
   `/status` (owners: queue, replies, gateway, uptime).
 
+- Threads need no @mention: with `who.replies: conversational` (the
+  default) every message in a thread the bot is part of reaches the
+  worker, which decides whether it is for it and stays silent when it is
+  not. `who.replies: free` does the same in plain channels. A forum
+  post's opening message and another bot never get a free reply.
+- The Muse's memory file (MEMORY.md) rides on every item, and a thread
+  shares its parent channel's recent history and summary: the same Muse
+  in every thread and channel, not one per channel.
+
 **Action needed**: an existing install re-invites the bot (the invite now
 asks for Create Public Threads) to use thread replies; voice messages
 need a `transcribe_command` in `config.yaml`.

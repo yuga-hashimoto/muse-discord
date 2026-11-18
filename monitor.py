@@ -3547,7 +3547,28 @@ MEMORY_FILE = os.environ.get("MUSE_MEMORY_FILE") \
 MEMORY_FACTS_PER_ITEM = 5
 MEMORY_FACT_MAX = 300
 MEMORY_PER_DAY = 20
+MEMORY_TEXT_CHARS = 2000  # how much of it a queue item carries
+_MEMORY_TEXT = {"mtime": None, "text": ""}
 _MEMORY_MISSING = {"logged": False}
+
+
+def muse_memory():
+    """The Muse's memory file (MEMORY.md) as text, or "": what it has
+    learned about its owner, handed to the worker on every item so it is
+    the same Muse in every thread and every channel. Cached by mtime;
+    ordinary file reads, no network."""
+    try:
+        mtime = os.path.getmtime(MEMORY_FILE)
+    except OSError:
+        return ""
+    if _MEMORY_TEXT["mtime"] != mtime:
+        try:
+            with open(MEMORY_FILE, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            return ""
+        _MEMORY_TEXT.update(mtime=mtime, text=text)
+    return _MEMORY_TEXT["text"].strip()[:MEMORY_TEXT_CHARS]
 
 
 def memory_line(text):
@@ -4264,6 +4285,30 @@ def addresses_bot(msg):
         or ("reply_to_bot" in RESPOND_TO and is_reply_to_bot(msg))
 
 
+def free_reply(msg, replies, author):
+    """True when a message that addresses nobody is still a candidate.
+
+    Two ways: the place is set to who.replies: free (a member answers
+    every message here, and the worker judges which are for it), or the
+    message was said in a thread — a thread is the conversation itself,
+    so with who.replies: conversational (the default) nobody has to
+    @mention the bot in it. Another bot never gets a free reply: who.bots
+    still decides, and when-addressed means addressed.
+    """
+    if is_bot_author(author):
+        return False
+    channel_id = str(msg.get("channel_id") or "")
+    if channel_id and str(msg.get("id") or "") == channel_id:
+        # A forum or media post's opening message shares the thread's id.
+        # Nobody @mentioned the bot in it: opening a post is not talking
+        # to it. The conversation after it is free, as in any thread.
+        return False
+    if replies == "free":
+        return True
+    info = CHANNELS.get(channel_id) or {}
+    return bool(info.get("thread")) and replies == "conversational"
+
+
 def trigger_verdict(msg, guild_id=None, state=None):
     """trigger_kind plus why: (kind, refusal). refusal is set only when
     the message addresses the bot directly (addresses_bot) and the
@@ -4288,14 +4333,21 @@ def trigger_verdict(msg, guild_id=None, state=None):
                       if direct else None)
     if is_bot_author(author) and here["who.bots"] == "ignore":
         return None, "who.bots: ignore" if direct else None
-    if not direct and not (state is not None
-                           and replies == "conversational"
-                           and follow_up_open(state, msg)):
+    if direct:
+        kind = "mention"
+    elif free_reply(msg, replies, author):
+        # Nobody was addressed, but this is a conversation the bot is in:
+        # the worker decides whether it is for it (FREEDOM in its prompt).
+        kind = "free"
+    elif state is not None and replies == "conversational" \
+            and follow_up_open(state, msg):
+        kind = "follow_up"
+    else:
         return None, None
     if not who_allows(msg, gid, here):
         return None, ("not allowed by who.allow / who.ignore"
                       if direct else None)
-    return ("mention" if direct else "follow_up"), None
+    return kind, None
 
 
 def note_refused(msg, cname, reason):
@@ -4381,8 +4433,8 @@ def stage_trigger(state, msg, cname, guild_id, kind, dm=False):
         if msg["id"] == entry["first_id"] or any(
                 f["id"] == msg["id"] for f in entry["fragments"]):
             return  # already in this burst (staged twice): nothing to add
-        if kind == "mention" and entry.get("kind") == "follow_up":
-            entry["kind"] = "mention"  # direct address beats a follow-up
+        if kind == "mention" and entry.get("kind") in ("follow_up", "free"):
+            entry["kind"] = "mention"  # direct address beats the rest
         entry["fragments"].append(msg)
         print(f"Additional trigger from {_who(msg).get('username')} "
               f"folded into pending burst in {cname}.", flush=True)
@@ -4541,7 +4593,8 @@ def flush_pending(state, queue, force=False):
                                      queue, dm=entry["kind"] == "dm",
                                      fragments=entry["fragments"],
                                      guild_id=entry["guild_id"],
-                                     follow_up=entry["kind"] == "follow_up")
+                                     follow_up=entry["kind"] == "follow_up",
+                                     kind=entry["kind"])
             except Exception as e:
                 # One poison burst must not hold back every other one:
                 # it is retried (then ledgered) like a failed enqueue.
@@ -5981,6 +6034,7 @@ def record_history(state, channel_id, messages):
     excludes it when attaching history to a queue item."""
     hist = state.setdefault("history", {}).setdefault(channel_id, [])
     seen_ids = {h["id"] for h in hist}
+    added = []
     for m in sorted(messages, key=lambda x: int(x["id"])):
         if m["id"] in seen_ids:
             continue
@@ -6008,10 +6062,54 @@ def record_history(state, channel_id, messages):
         hist.append(entry)
         seen_ids.add(m["id"])
         note_links(m)
+        added.append(entry)
     # Sorted: the poll re-reads messages the gateway already recorded,
     # and an old one re-added must not land after newer ones.
     hist.sort(key=lambda h: int(h["id"]))
     state["history"][channel_id] = hist[-HISTORY_PER_CHANNEL:]
+    if added:
+        _mirror_to_parent(state, channel_id, added)
+
+
+def _mirror_to_parent(state, channel_id, entries):
+    """A thread's messages also join its parent channel's window, tagged
+    with the thread's name. A conversation that moves into a thread (or
+    comes back out of one, or is picked up again days later) then keeps
+    what was said on both sides: one Muse, not one per channel."""
+    info = CHANNELS.get(channel_id) or {}
+    parent = info.get("parent_id") if info.get("thread") else None
+    if not parent or parent == channel_id:
+        return
+    phist = state.setdefault("history", {}).setdefault(parent, [])
+    seen = {h["id"] for h in phist}
+    via = info.get("name") or "thread"
+    for entry in entries:
+        if entry["id"] in seen:
+            continue
+        phist.append(dict(entry, via=via))
+    phist.sort(key=lambda h: int(h["id"]))
+    state["history"][parent] = phist[-HISTORY_PER_CHANNEL:]
+
+
+def history_window(state, channel_id):
+    """The recent messages an item here gets: its channel's window plus,
+    in a thread, the parent channel's (oldest first, deduped). The
+    parent's window already holds the thread's own messages, so a
+    conversation keeps its thread wherever it is continued."""
+    hists = state.get("history") or {}
+    channel_id = str(channel_id or "")
+    info = CHANNELS.get(channel_id) or {}
+    parent = info.get("parent_id") if info.get("thread") else None
+    entries = list(hists.get(channel_id) or [])
+    if parent:
+        entries += list(hists.get(str(parent)) or [])
+    seen, out = set(), []
+    for h in sorted(entries, key=lambda x: int(x["id"])):
+        if h["id"] in seen:
+            continue
+        seen.add(h["id"])
+        out.append(h)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -6023,9 +6121,15 @@ def record_history(state, channel_id, messages):
 # context, so writing the summary is part of its run.
 # ---------------------------------------------------------------------------
 def channel_summary(state, channel_id):
-    """The summary stored for a channel ("" when none)."""
-    entry = (state.get("summaries") or {}).get(str(channel_id)) or {}
+    """The summary stored for a channel ("" when none); a thread with no
+    summary of its own uses its parent channel's."""
+    store = state.get("summaries") or {}
+    entry = store.get(str(channel_id)) or {}
     text = entry.get("text") if isinstance(entry, dict) else ""
+    if not text:
+        parent = (CHANNELS.get(str(channel_id)) or {}).get("parent_id")
+        entry = store.get(str(parent)) or {} if parent else {}
+        text = entry.get("text") if isinstance(entry, dict) else ""
     return str(text or "")[:SUMMARY_SEEN_CHARS]
 
 
@@ -6434,7 +6538,7 @@ def note_item_meta(state, mid, **meta):
 
 
 def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
-                    guild_id=None, follow_up=False):
+                    guild_id=None, follow_up=False, kind=None):
     """Run one message (plus any burst fragments coalesced with it) through
     the quarantine/rate-limit/media pipeline and append a SINGLE item to
     the queue. follow_up: staged from a conversational follow-up window
@@ -6549,8 +6653,9 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
                 hold_suspicious(f"{matched} (in {where})")
                 return False
 
-    # 4. Recent history, without the burst itself.
-    history = [h for h in chan_hist
+    # 4. Recent history, without the burst itself. In a thread the parent
+    #    channel's window comes too: the conversation, not the channel.
+    history = [h for h in history_window(state, msg["channel_id"])
                if h["id"] not in burst_ids][-HISTORY_ATTACHED:]
 
     # 5. Generation permission (media.*) and plugin gates. may_generate
@@ -6593,7 +6698,9 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         "channel_id": msg["channel_id"],
         "channel_name": cname,
         "guild_id": guild_id,
-        "kind": "dm" if dm else "mention",
+        # free: said in a thread (or where who.replies is free) without
+        # addressing anyone; the worker decides whether it is for it.
+        "kind": "free" if kind == "free" else ("dm" if dm else "mention"),
         "author": msg["author"].get("username"),
         "author_id": author_id,
         "content": content,
@@ -6607,6 +6714,11 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         "links": links,
         "history": history,
         "summary": channel_summary(state, msg["channel_id"]),
+        # What the Muse has learned about its owner, everywhere (privacy.
+        # memory: nothing leaves it out here; the card says what may be
+        # used in front of others).
+        "muse_memory": "" if here["privacy.memory"] == "nothing"
+        else muse_memory(),
         # Whether this reply may live in a thread of its own: the engine
         # switch, and the place's style.threads (a channel can stay inline).
         "thread_ok": bool(THREAD_REPLIES and here["style.threads"]),

@@ -122,7 +122,11 @@ all_servers:
                           #   reply to the bot.
                           # conversational: also answers the person it
                           #   just replied to when they keep talking
-                          #   within ~2 minutes without @mentioning it.
+                          #   within ~2 minutes without @mentioning it,
+                          #   and every message in a thread it is in
+                          #   (the worker decides which are for it).
+                          # free: the same everywhere here, every
+                          #   message, thread or not.
                           # off: stays quiet.
 
 # --- One server at a time (example: remove the # marks to use) ----

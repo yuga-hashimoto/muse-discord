@@ -91,7 +91,7 @@ an item no longer in the queue is refused. Item fields:
 | `channel_id` | Channel to reply in |
 | `channel_name` | e.g. `"My Server #general"`, or `"DM with <name>"` |
 | `guild_id` | Server id, or null for DMs |
-| `kind` | `"mention"` (an @mention or a reply to the bot) or `"dm"`; the monitor's own: `"reminder"`, `"watch-met"` (Reminders and watches), `"proactive"` (Unprompted messages) |
+| `kind` | `"mention"` (an @mention or a reply to the bot), `"dm"`, or `"free"` (in a thread, or where `who.replies` is `free`: said without addressing anyone, so the worker decides); the monitor's own: `"reminder"`, `"watch-met"` (Reminders and watches), `"proactive"` (Unprompted messages) |
 | `author`, `author_id` | Who wrote it |
 | `content` | The text; for a burst, all fragments joined oldest-first |
 | `timestamp` | ISO time of the trigger |
@@ -100,7 +100,8 @@ an item no longer in the queue is refused. Item fields:
 | `unviewable` | Attachments that could not be made viewable |
 | `audio` | Voice notes and audio attachments, downloaded: `[{name, path, content_type}]`; the worker runs `bin/transcribe.py` on each (it is the only file it may open besides the prompt and media) |
 | `links` | Pages a link in the message points at, read by the monitor: `[{url, title, text}]` (text truncated; https only, public addresses only, at most 2 per message) |
-| `summary` | The summary the worker last wrote for this channel (Summaries), else `""` |
+| `summary` | The summary the worker last wrote for this channel (Summaries), else `""` (a thread falls back to its parent's) |
+| `muse_memory` | The Muse's memory file (MEMORY.md), truncated: what it knows about its owner, the same in every thread and channel (empty when `privacy.memory` is `nothing`) |
 | `thread_ok` | Whether a reply here may live in a thread of its own: `engine.thread_replies`, and the place's `style.threads` |
 | `history` | Up to 8 channel messages before the trigger: `[{id, author, author_id, bot, webhook?, display?, text, ts}]`, text cut to 300 characters |
 | `may_generate` | Generation permission (Generation) |
@@ -475,7 +476,9 @@ Enforced by the monitor before anything is queued:
 
 - **Strict triggers.** Only direct address queues work: an @mention,
   a reply to the bot, or a DM, plus follow-ups where `who.replies` is
-  `conversational` (the default). Other bots count as direct address
+  `conversational` (the default), plus free replies in a thread and
+  where `who.replies` is `free` (Free replies). Other bots count as
+  direct address
   (`who.bots: when-addressed`), never for follow-ups. Then
   `who.replies: off`, `who.allow`, `who.ignore`, `who.bots: ignore`,
   the ownerless-server gate, `who.bot_exchange_limit`, the `limits`
@@ -496,6 +499,20 @@ Enforced by the monitor before anything is queued:
   answers for that server, and the server does not count as shared for
   `who.dms_from: shared-servers`. An owner's message there settles it.
   Servers the bot was in before the check existed are not checked.
+
+### Free replies
+
+A thread is a conversation, not a waiting room. With `who.replies:
+conversational` (the default) or `free`, a message in a thread that
+addresses nobody still reaches the worker as `kind: "free"`, and the
+worker decides whether it is for the bot (FREEDOM in its prompt); when
+it is not, it writes a `silent` item. A place set to `who.replies:
+free` treats every channel message that way, not only threads;
+`when-addressed` keeps threads mention-only. Another bot never gets a
+free reply (`who.bots`), and every other gate still applies
+(`who.allow`, `who.ignore`, the caps, the injection filter). The item
+carries the thread's and its parent channel's recent messages, so the
+conversation keeps its context on both sides.
 
 ### Follow-ups
 

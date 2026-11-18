@@ -75,7 +75,7 @@ the newest change at that place with everything made together with it
 
 | They say | KEY | VALUE |
 | --- | --- | --- |
-| When it answers: chatty / only when @mentioned / off | `who.replies` | `conversational`, `when-addressed`, `off` |
+| When it answers: chatty / only when @mentioned / free / off | `who.replies` | `conversational`, `when-addressed`, `free`, `off` |
 | Who can DM it (`dms` or `defaults`) | `who.dms_from` | `owners`, `shared-servers`, `anyone`, or user ids separated by commas (the owner plus those people) |
 | Nobody can DM it | `who.replies` at `dms` | `off` |
 | Only answer these people | `who.allow` | `everyone`, or ids / `role:<id>` |

@@ -708,8 +708,9 @@ def who_text(R, by):
 # ---------------------------------------------------------------------------
 # How the bot behaves at a place, in plain words
 # ---------------------------------------------------------------------------
-REPLIES_WORDS = {"conversational": "I chat freely",
+REPLIES_WORDS = {"conversational": "I chat freely (and in threads)",
                  "when-addressed": "I reply only when @mentioned",
+                 "free": "I read every message and decide when to answer",
                  "off": "I'm off"}
 LENGTH_WORDS = {"brief": "short replies", "detailed": "detailed replies"}
 MEMORY_WORDS = {"everything": "may bring up anything I remember about "
@@ -822,6 +823,7 @@ UI_LABELS = {
 }
 UI_VALUES = {("who.replies", "conversational"): "chat freely",
              ("who.replies", "when-addressed"): "only when @mentioned",
+             ("who.replies", "free"): "free (it decides)",
              ("who.replies", "off"): "off"}
 
 
@@ -1118,7 +1120,8 @@ PLACE_CONTROLS = {"channel": ("r", "med"),
 CAP_CHOICES = (5, 10, 20, 50, 100)
 # When I reply's options, by value (and "Off", which is Pause).
 REPLY_CHOICES = {"conversational": "Chat freely",
-                 "when-addressed": "Only when @mentioned", "off": "Off"}
+                 "when-addressed": "Only when @mentioned",
+                 "free": "Free (it decides)", "off": "Off"}
 
 
 def follow_option(R, place, key, now):
