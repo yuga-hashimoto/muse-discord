@@ -91,7 +91,7 @@ an item no longer in the queue is refused. Item fields:
 | `channel_id` | Channel to reply in |
 | `channel_name` | e.g. `"My Server #general"`, or `"DM with <name>"` |
 | `guild_id` | Server id, or null for DMs |
-| `kind` | `"mention"` (an @mention or a reply to the bot), `"dm"`, or `"free"` (in a thread, or where `who.replies` is `free`: said without addressing anyone, so the worker decides); the monitor's own: `"reminder"`, `"watch-met"` (Reminders and watches), `"proactive"` (Unprompted messages) |
+| `kind` | `"mention"` (an @mention or a reply to the bot), `"dm"`, or `"free"` (where `who.replies` is `free`: said without addressing anyone, so the worker decides; never in a thread); the monitor's own: `"reminder"`, `"watch-met"` (Reminders and watches), `"proactive"` (Unprompted messages) |
 | `author`, `author_id` | Who wrote it |
 | `content` | The text; for a burst, all fragments joined oldest-first |
 | `timestamp` | ISO time of the trigger |
@@ -485,8 +485,9 @@ Enforced by the monitor before anything is queued:
 
 - **Strict triggers.** Only direct address queues work: an @mention,
   a reply to the bot, or a DM, plus follow-ups where `who.replies` is
-  `conversational` (the default), plus free replies in a thread and
-  where `who.replies` is `free` (Free replies). Other bots count as
+  `conversational` (the default, outside threads), plus free replies
+  where `who.replies` is `free` (Free replies). A thread is
+  mention-only. Other bots count as
   direct address
   (`who.bots: when-addressed`), never for follow-ups. Then
   `who.replies: off`, `who.allow`, `who.ignore`, `who.bots: ignore`,
@@ -511,16 +512,22 @@ Enforced by the monitor before anything is queued:
 
 ### Free replies
 
-A thread is a conversation, not a waiting room. With `who.replies:
-conversational` (the default) or `free`, a message in a thread that
-addresses nobody still reaches the worker as `kind: "free"`, and the
-worker decides whether it is for the bot (FREEDOM in its prompt); when
-it is not, it writes a `silent` item. A place set to `who.replies:
-free` treats every channel message that way, not only threads;
-`when-addressed` keeps threads mention-only. Another bot never gets a
+A thread is mention-only. A message there reaches the worker only when
+it @mentions the bot or replies to one of its messages; a thread the
+bot spoke in before is not a standing invitation, and the follow-up
+window does not open in threads. When a mention does wake it in a
+thread the bot has not been reading, the monitor reads that thread's
+recent messages once, so the item carries the conversation — being
+mentioned is what allows the bot to read the thread, and it is then
+expected to judge whether it has to answer (FREEDOM; `silent` when it
+does not).
+
+Elsewhere, a place set to `who.replies: free` makes every channel
+message a candidate; `conversational` adds follow-ups (the person's
+messages right after the bot answered them). Another bot never gets a
 free reply (`who.bots`), and every other gate still applies
 (`who.allow`, `who.ignore`, the caps, the injection filter). The item
-carries the thread's and its parent channel's recent messages, so the
+carries the channel's and its parent channel's recent messages, so the
 conversation keeps its context on both sides.
 
 A free message wakes the worker only when it plausibly wants it
@@ -535,8 +542,8 @@ window, so a person can keep talking without mentioning the bot:
 
 - The window opens when the bot sends a reply to a human in a channel
   (a `silent` item opens nothing). For 120 seconds (a fixed constant),
-  that person's messages in that channel or thread count as addressed.
-  Each thread has its own; bots never get one.
+  that person's messages in that channel count as addressed. Threads
+  are mention-only: no window opens there. Bots never get one.
 - Only that person's messages use it, and only theirs written after it
   opened. Every bot reply to them there restarts it; their own
   messages never extend it.
@@ -1399,7 +1406,7 @@ and backoff); 0 is honoured where it means something.
 | `engine.thread_mention` | same | off | Ping the author in the new thread's first message, so the reply is noticed |
 | `engine.ack_reactions` | same | off | 👀 on a queued message, then ✅ (replied), ❌ (given up) or nothing (the worker chose silence) |
 | `engine.transcribe_command` | same | none | Speech-to-text for voice messages, run by the worker through `bin/transcribe.py`: a command using `{file}` |
-| `engine.free_gate` | same | on | Free replies (in a thread, or where `who.replies` is `free`) wake the worker only for a message that plausibly wants it; a dropped one is still recorded in history |
+| `engine.free_gate` | same | on | Free replies (where `who.replies` is `free`) wake the worker only for a message that plausibly wants it; a dropped one is still recorded in history |
 | `engine.free_gate_minutes` | same | 10 | "Recently part of the conversation": the bot spoke in this channel within this many minutes (0: never) |
 | `engine.guild_ids` | `bot.guild_ids` | `[]` | Only these servers; empty: every server |
 

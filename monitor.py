@@ -4308,34 +4308,16 @@ def addresses_bot(msg):
         or ("reply_to_bot" in RESPOND_TO and is_reply_to_bot(msg))
 
 
-def bot_is_in_thread(state, channel_id):
-    """Whether the bot is already part of this thread: it made it, or it
-    has spoken in it (its own messages are in the history). A thread it
-    never joined is somebody else's conversation."""
-    channel_id = str(channel_id or "")
-    if state is None:
-        return True   # no state to judge by (tests, odd callers): as before
-    if channel_id in _NEW_THREADS:
-        return True
-    for known in _REPLY_THREADS.values():
-        if channel_id in known.values():
-            return True
-    if state is not None:
-        for entry in (state.get("history") or {}).get(channel_id) or []:
-            if entry.get("bot"):
-                return True
-    return False
-
-
 def free_reply(msg, replies, author, state=None):
     """True when a message that addresses nobody is still a candidate.
 
-    Two ways: the place is set to who.replies: free (a member answers
-    every message here, and the worker judges which are for it), or the
-    message was said in a thread — a thread is the conversation itself,
-    so with who.replies: conversational (the default) nobody has to
-    @mention the bot in it. Another bot never gets a free reply: who.bots
-    still decides, and when-addressed means addressed.
+    Only in a place set to who.replies: free (a member answers every
+    message there, and the worker judges which are for it). A thread is
+    never free: it is somebody else's conversation until the bot is
+    addressed — a mention, a Discord reply to it, or (outside a thread)
+    the person's open follow-up window. A thread the bot spoke in before
+    is not a standing invitation either: every Muse in it would answer
+    every message. Another bot never gets a free reply.
     """
     if is_bot_author(author):
         return False
@@ -4343,14 +4325,11 @@ def free_reply(msg, replies, author, state=None):
     if channel_id and str(msg.get("id") or "") == channel_id:
         # A forum or media post's opening message shares the thread's id.
         # Nobody @mentioned the bot in it: opening a post is not talking
-        # to it. The conversation after it is free, as in any thread.
+        # to it.
         return False
     info = CHANNELS.get(channel_id) or {}
     if info.get("thread"):
-        # A thread is free only where the bot is already in the
-        # conversation; threads it never joined need a mention.
-        return (replies in ("conversational", "free")
-                and bot_is_in_thread(state, channel_id))
+        return False
     return replies == "free"
 
 
@@ -4358,13 +4337,15 @@ _FREE_WAKES = {}   # channel id -> wake times in the last minute
 
 
 def bot_spoke_recently(state, channel_id, minutes):
-    """True when the bot said something in this channel (or, in a thread,
-    in its parent) within *minutes*: an exchange is going on."""
+    """True when the bot itself said something in this channel (or, in a
+    thread, in its parent) within *minutes*: an exchange is going on.
+    Another bot speaking there is not this bot's exchange."""
     if minutes <= 0:
         return False
     cutoff = time.time() - minutes * 60
     for entry in history_window(state, channel_id):
-        if entry.get("bot") and _snowflake_ts(entry["id"]) >= cutoff:
+        if str(entry.get("author_id")) == BOT_ID \
+                and _snowflake_ts(entry["id"]) >= cutoff:
             return True
     return False
 
@@ -4472,10 +4453,12 @@ def trigger_verdict(msg, guild_id=None, state=None):
     if direct:
         kind = "mention"
     elif state is not None and replies == "conversational" \
+            and not (CHANNELS.get(msg.get("channel_id")) or {}).get("thread") \
             and follow_up_open(state, msg):
         # The follow-up window is open: this is the same conversation the
-        # bot is already in, so it keeps follow-up semantics even in a
-        # thread (where it would otherwise be a free message).
+        # bot is already in. A thread is mention-only: there the window
+        # does not apply, so a thread the bot joined is not a channel
+        # where every later message comes back to it.
         kind = "follow_up"
     elif free_reply(msg, replies, author, state):
         # Nobody was addressed, but this is a conversation the bot is in.
@@ -6336,6 +6319,36 @@ def history_window(state, channel_id):
     return out
 
 
+_BACKFILLED_THREADS = set()   # threads read once, on being addressed there
+
+
+def backfill_thread(state, msg, limit=HISTORY_PER_CHANNEL):
+    """Read a thread's recent messages the first time the bot is addressed
+    in it.
+
+    A mention can be the first thing the bot ever sees in a thread: its
+    history would be empty and the worker blind to what it is being asked
+    into. Read the thread once so the item carries the conversation
+    (being mentioned there is the permission to read it). Failures are
+    logged, never fatal: the reply still goes out with what history there
+    is.
+    """
+    cid = str(msg.get("channel_id") or "")
+    info = CHANNELS.get(cid) or {}
+    if not info.get("thread") or cid in _BACKFILLED_THREADS:
+        return
+    _BACKFILLED_THREADS.add(cid)
+    try:
+        msgs = api_get(f"/channels/{cid}/messages?limit={int(limit)}")
+    except Exception as e:
+        print(f"Could not read thread {cid} before answering: {e}",
+              flush=True)
+        return
+    if isinstance(msgs, list):
+        record_history(state, cid,
+                       [m for m in msgs if isinstance(m, dict)])
+
+
 # ---------------------------------------------------------------------------
 # Conversation summaries. The rolling window (HISTORY_ATTACHED) is short on
 # purpose; a conversation that runs for a while in one channel or thread
@@ -6769,6 +6782,10 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     fragments = [f for f in (fragments or []) if f["id"] != msg["id"]]
     if any(q["message_id"] == msg["id"] for q in queue):
         return False
+    if addresses_bot(msg):
+        # Addressed in a thread: read its recent messages first, so the
+        # worker sees the conversation it was called into.
+        backfill_thread(state, msg)
     author_id = msg.get("author", {}).get("id")
     author_name = msg.get("author", {}).get("username")
     # Every outcome below is recorded for the trigger AND each fragment:

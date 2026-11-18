@@ -429,7 +429,8 @@ class FreeReplies(unittest.TestCase):
         mod.CHANNELS["T1"] = dict(THREAD_ITEM)
         # The bot is already part of the thread (it spoke there).
         st = mod.load_state()
-        mod.record_history(st, "T1", [H.msg("T1", "999", "hi", bot=True, age=5)])
+        mod.record_history(st, "T1",
+                           [H.msg("T1", mod.BOT_ID, "hi", bot=True, age=5)])
         mod.tstate = st
         return mod
 
@@ -438,11 +439,14 @@ class FreeReplies(unittest.TestCase):
                 "author": {"id": uid, "username": "u", "bot": bot},
                 "content": "and then?", "type": 0}
 
-    def test_a_thread_message_reaches_the_worker(self):
+    def test_a_thread_message_waits_for_a_mention(self):
+        # Being in a thread (even one it spoke in) is not an invitation:
+        # with nobody addressed, the bot stays out of it.
         mod = self.threaded()
         m = self.said("T1")
-        self.assertTrue(mod.free_reply(m, "conversational", m["author"],
-                                       mod.tstate))
+        self.assertFalse(mod.free_reply(m, "conversational", m["author"],
+                                        mod.tstate))
+        self.assertIsNone(mod.trigger_verdict(m, G1, mod.tstate)[0])
 
     def test_a_message_for_someone_else_is_not_ours(self):
         mod = self.threaded()
@@ -460,7 +464,21 @@ class FreeReplies(unittest.TestCase):
                                         mod.load_state()))
         self.assertFalse(mod.free_reply(m, "free", m["author"],
                                         mod.load_state()))
-        self.assertEqual(mod.trigger_verdict(m, G1, None)[0], "free")
+        self.assertIsNone(mod.trigger_verdict(m, G1, None)[0])
+
+    def test_another_bots_message_does_not_make_it_a_participant(self):
+        # Only another bot has spoken in this thread. That is somebody
+        # else's conversation: this bot was never mentioned there, so it
+        # stays quiet (it must not answer, nor react, in it).
+        mod = load(THREAD_CFG)
+        mod.CHANNELS["T1"] = dict(THREAD_ITEM)
+        st = mod.load_state()
+        mod.record_history(st, "T1",
+                           [H.msg("T1", "888", "hi", bot=True, age=5)])
+        m = self.said("T1")
+        self.assertFalse(mod.free_reply(m, "conversational", m["author"], st))
+        mod.settings = lambda: FakeSettings("conversational")
+        self.assertIsNone(mod.trigger_verdict(m, G1, st)[0])
 
     def test_when_addressed_keeps_a_thread_quiet(self):
         mod = self.threaded()
@@ -483,13 +501,14 @@ class FreeReplies(unittest.TestCase):
 
     def test_a_forum_post_opening_is_not_free(self):
         # A post's opening message shares the thread's id: posting is not
-        # talking to the bot, so only the conversation after it is free.
+        # talking to the bot. Neither is anything after it without a
+        # mention: a thread is mention-only.
         mod = self.threaded()
         m = self.said("T1")
         m["id"] = "T1"
         self.assertFalse(mod.free_reply(m, "free", m["author"]))
         later = self.said("T1")
-        self.assertTrue(mod.free_reply(later, "free", later["author"]))
+        self.assertFalse(mod.free_reply(later, "free", later["author"]))
 
     def test_another_bot_never_gets_one(self):
         mod = self.threaded()
@@ -583,25 +602,27 @@ class SharedMemory(unittest.TestCase):
 
 class FreeGate(unittest.TestCase):
     """F: a free message wakes the worker only when it plausibly wants it,
-    and what it drops stays in history."""
+    and what it drops stays in history. (Free applies to a channel set to
+    who.replies: free; a thread is mention-only.)"""
 
     def setUp(self):
         self.mod = load()
-        self.mod.CHANNELS["T1"] = dict(THREAD_ITEM)
+        self.mod.CHANNELS["CH"] = chan()
+        self.mod.settings = lambda: FakeSettings("free")
         self.st = self.mod.load_state()
         self.st["guild_joined"] = {G1: 0}
-        # the bot is already part of the thread
-        self.mod.record_history(self.st, "T1",
-                                [H.msg("T1", "999", "hi", bot=True, age=1800)])
+        # the bot spoke here half an hour ago (the gate's window has passed)
+        self.mod.record_history(self.st, CH,
+                                [H.msg(CH, "999", "hi", bot=True, age=1800)])
 
     def said(self, text="and then?", uid="222", bot=False):
-        return {"id": sf(), "channel_id": "T1", "guild_id": G1,
+        return {"id": sf(), "channel_id": CH, "guild_id": G1,
                 "author": {"id": uid, "username": "u", "bot": bot},
                 "content": text, "type": 0}
 
     def verdict(self, text="and then?", uid="222"):
         m = self.said(text, uid)
-        self.mod.record_history(self.st, "T1", [m])
+        self.mod.record_history(self.st, CH, [m])
         return self.mod.trigger_verdict(m, G1, self.st)
 
     def test_plain_chatter_waits(self):
@@ -620,13 +641,13 @@ class FreeGate(unittest.TestCase):
         self.assertEqual(self.verdict("ただのつぶやき", uid="111")[0], "free")
 
     def test_an_exchange_it_was_in(self):
-        self.mod.record_history(self.st, "T1",
-                                [H.msg("T1", "999", "sure", bot=True, age=5)])
+        self.mod.record_history(self.st, CH,
+                                [H.msg(CH, "999", "sure", bot=True, age=5)])
         self.assertEqual(self.verdict("and then we went home")[0], "free")
 
     def test_what_it_drops_is_still_history(self):
         self.assertIsNone(self.verdict("and then we went home", "222")[0])
-        texts = [h["text"] for h in self.st["history"]["T1"]]
+        texts = [h["text"] for h in self.st["history"][CH]]
         self.assertIn("and then we went home", texts)
 
     def test_a_flood_only_lets_the_owner_through(self):
@@ -891,6 +912,40 @@ engine:
             MS.load(write(os.path.join(d, "config.yaml"), cfg),
                     os.path.join(MUT, "plugins"))
         self.assertIn("threads_reply", str(ctx.exception))
+
+
+class ThreadBackfill(unittest.TestCase):
+    """A mention in a thread the bot has not been reading: read it once,
+    so the worker sees what it is being asked into."""
+
+    def test_a_mention_in_an_unread_thread_reads_it_first(self):
+        mod = load(THREAD_CFG)
+        mod.CHANNELS["T1"] = dict(THREAD_ITEM)
+        st = mod.load_state()
+        seen = []
+
+        def fake_api(path, payload=None):
+            seen.append(path)
+            return [H.msg("T1", "222", "earlier", age=120),
+                    H.msg("T1", "222", "more", age=60)]
+
+        mod.api_get = fake_api
+        m = H.msg("T1", "222", "hey @muse", mention=True)
+        mod.backfill_thread(st, m)
+        texts = [h["text"] for h in st["history"]["T1"]]
+        self.assertIn("earlier", texts)
+        self.assertIn("more", texts)
+        self.assertEqual(len(seen), 1)
+        mod.backfill_thread(st, m)          # once per thread
+        self.assertEqual(len(seen), 1)
+
+    def test_a_plain_channel_is_not_read(self):
+        mod = load()
+        st = mod.load_state()
+        seen = []
+        mod.api_get = lambda *a, **k: seen.append(a) or []
+        mod.backfill_thread(st, H.msg(CH, "222", "hi"))
+        self.assertEqual(seen, [])
 
 
 if __name__ == "__main__":

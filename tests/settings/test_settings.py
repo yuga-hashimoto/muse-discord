@@ -1005,8 +1005,9 @@ class FollowUps(MonitorBase):
         self.assertIsNone(self.kind(gmsg(U1, "here", channel=THREAD)))
         self.assertIsNone(self.kind(gmsg(U1, "there", channel=CH2)))
         self.answered(channel=THREAD)
-        self.assertEqual(self.kind(gmsg(U1, "here", channel=THREAD)),
-                         "follow_up")
+        # A thread is mention-only: a reply there opens no window, so a
+        # message that addresses nobody is not a follow-up either.
+        self.assertIsNone(self.kind(gmsg(U1, "here", channel=THREAD)))
 
     def test_closes_when_addressing_someone_else(self):
         self.answered()
