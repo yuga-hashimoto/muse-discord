@@ -28,6 +28,13 @@ UPDATING.md walks a Muse through it.
   worker, which decides whether it is for it and stays silent when it is
   not. `who.replies: free` does the same in plain channels. A forum
   post's opening message and another bot never get a free reply.
+- Other places' summaries ride along (`summaries`, same server only;
+  a DM's never reaches a channel), and Discord message/thread links in
+  the chat are read with the bot's token instead of being handed over as
+  a URL the worker cannot open.
+- Free replies are gated (`engine.free_gate`): the owner, its name, a
+  question, or an exchange it was recently part of. Dropped messages
+  still go into the history the next wake reads.
 - The Muse's memory file (MEMORY.md) rides on every item, and a thread
   shares its parent channel's recent history and summary: the same Muse
   in every thread and channel, not one per channel.

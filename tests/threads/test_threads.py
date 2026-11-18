@@ -559,6 +559,171 @@ class SharedMemory(unittest.TestCase):
         self.assertIn("Likes tea", q[0]["muse_memory"])  # default: public-only
 
 
+class FreeGate(unittest.TestCase):
+    """F: a free message wakes the worker only when it plausibly wants it,
+    and what it drops stays in history."""
+
+    def setUp(self):
+        self.mod = load()
+        self.mod.CHANNELS["T1"] = dict(THREAD_ITEM)
+        self.st = self.mod.load_state()
+        self.st["guild_joined"] = {G1: 0}
+
+    def said(self, text="and then?", uid="222", bot=False):
+        return {"id": sf(), "channel_id": "T1", "guild_id": G1,
+                "author": {"id": uid, "username": "u", "bot": bot},
+                "content": text, "type": 0}
+
+    def verdict(self, text="and then?", uid="222"):
+        m = self.said(text, uid)
+        self.mod.record_history(self.st, "T1", [m])
+        return self.mod.trigger_verdict(m, G1, self.st)
+
+    def test_plain_chatter_waits(self):
+        self.assertIsNone(self.verdict("and then we went home")[0])
+
+    def test_a_question_wakes_it(self):
+        self.assertEqual(self.verdict("これどう思う？")[0], "free")
+
+    def test_a_question_mark_in_ascii_counts(self):
+        self.assertEqual(self.verdict("what now?")[0], "free")
+
+    def test_its_name_wakes_it(self):
+        self.assertEqual(self.verdict("muse これ見て")[0], "free")
+
+    def test_the_owner_always_wakes_it(self):
+        self.assertEqual(self.verdict("ただのつぶやき", uid="111")[0], "free")
+
+    def test_an_exchange_it_was_in(self):
+        self.mod.record_history(self.st, "T1",
+                                [H.msg("T1", "999", "sure", bot=True, age=5)])
+        self.assertEqual(self.verdict("and then we went home")[0], "free")
+
+    def test_what_it_drops_is_still_history(self):
+        self.assertIsNone(self.verdict("and then we went home", "222")[0])
+        texts = [h["text"] for h in self.st["history"]["T1"]]
+        self.assertIn("and then we went home", texts)
+
+    def test_a_flood_only_lets_the_owner_through(self):
+        for _ in range(mod_const(self.mod)):
+            self.assertEqual(self.verdict("why?", "222")[0], "free")
+        self.assertIsNone(self.verdict("why again?", "222")[0])
+        self.assertEqual(self.verdict("owner asks why?", "111")[0], "free")
+
+
+def mod_const(mod):
+    return mod.FREE_GATE_MAX_PER_MINUTE
+
+
+class SummaryIndex(unittest.TestCase):
+    """B: other places' summaries, same server only, never a DM's."""
+
+    def test_the_same_servers_places_ride_along(self):
+        mod = load()
+        st = mod.load_state()
+        here, there = sf(), sf()
+        mod.CHANNELS = {here: chan("general"),
+                        there: {"name": "plans", "guild_id": G1,
+                                "guild_name": "Srv"}}
+        mod.store_summary(st, {"channel_id": there, "summary": "we ship Friday"})
+        index = mod.summary_index(st, here, G1, False)
+        self.assertEqual(len(index), 1)
+        self.assertEqual(index[0]["place"], "Srv #plans")
+        self.assertIn("ship Friday", index[0]["text"])
+
+    def test_another_server_stays_out(self):
+        mod = load()
+        st = mod.load_state()
+        here, there = sf(), sf()
+        mod.CHANNELS = {here: chan("general"),
+                        there: {"name": "secret", "guild_id": "G2",
+                                "guild_name": "Other"}}
+        mod.store_summary(st, {"channel_id": there, "summary": "x"})
+        self.assertEqual(mod.summary_index(st, here, G1, False), [])
+
+    def test_a_dm_summary_never_reaches_a_channel(self):
+        mod = load()
+        st = mod.load_state()
+        here, dm = sf(), sf()
+        mod.CHANNELS = {here: chan("general")}
+        other_dm = sf()
+        mod.DM_CHANNELS[dm] = "DM with yu"
+        mod.DM_CHANNELS[other_dm] = "DM with someone"
+        mod.store_summary(st, {"channel_id": other_dm,
+                               "summary": "private thing"})
+        self.assertEqual(mod.summary_index(st, here, G1, False), [])
+        index = mod.summary_index(st, dm, None, True)
+        self.assertEqual(index[0]["place"], "DM with someone")
+
+    def test_it_is_capped(self):
+        mod = load()
+        st = mod.load_state()
+        here = sf()
+        mod.CHANNELS = {here: chan("general")}
+        for _ in range(mod.SUMMARY_INDEX_MAX + 3):
+            cid = sf()
+            mod.CHANNELS[cid] = {"name": "c" + cid[-4:], "guild_id": G1,
+                                 "guild_name": "Srv"}
+            mod.store_summary(st, {"channel_id": cid, "summary": "x"})
+        self.assertLessEqual(len(mod.summary_index(st, here, G1, False)),
+                             mod.SUMMARY_INDEX_MAX)
+
+
+class DiscordLinks(unittest.TestCase):
+    """C: a Discord message or thread link is read with the bot's token,
+    never a DM, never a channel it cannot read."""
+
+    def test_a_link_is_parsed(self):
+        mod = load()
+        self.assertEqual(
+            mod.discord_link_parts("https://discord.com/channels/1/2/3"),
+            ("1", "2", "3"))
+        self.assertEqual(
+            mod.discord_link_parts("<https://discordapp.com/channels/1/2>"),
+            ("1", "2", None))
+        self.assertIsNone(mod.discord_link_parts("https://discord.gg/abc"))
+
+    def test_a_message_is_read(self):
+        mod = load()
+        cid, mid = sf(), sf()
+        mod.api.routes[f"/channels/{cid}"] = {"id": cid, "type": 0,
+                                              "name": "general"}
+        mod.api.routes[f"/channels/{cid}/messages/{mid}"] = {
+            "id": mid, "content": "ship it", "author": {"username": "yu"}}
+        title, text = mod.resolve_discord_link(
+            f"https://discord.com/channels/1/{cid}/{mid}")
+        self.assertIn("yu", title)
+        self.assertIn("ship it", text)
+
+    def test_a_thread_link_gives_its_recent_messages(self):
+        mod = load()
+        cid = sf()
+        mod.api.routes[f"/channels/{cid}"] = {"id": cid, "type": 11,
+                                              "name": "plans"}
+        mod.api.msgs[cid] = [
+            {"id": sf(), "content": "first", "author": {"username": "a"}},
+            {"id": sf(), "content": "second", "author": {"username": "b"}}]
+        title, text = mod.resolve_discord_link(
+            f"https://discord.com/channels/1/{cid}")
+        self.assertIn("plans", title)
+        self.assertIn("first", text)
+        self.assertIn("second", text)
+
+    def test_a_dm_is_never_read(self):
+        mod = load()
+        cid, mid = sf(), sf()
+        mod.api.routes[f"/channels/{cid}"] = {"id": cid, "type": 1}
+        self.assertIsNone(mod.resolve_discord_link(
+            f"https://discord.com/channels/1/{cid}/{mid}"))
+
+    def test_an_unreadable_channel_is_none(self):
+        mod = load()
+        cid = sf()
+        mod.api.errors[f"/channels/{cid}"] = HTTPErr(403)
+        self.assertIsNone(mod.resolve_discord_link(
+            f"https://discord.com/channels/1/{cid}"))
+
+
 class TheSetting(unittest.TestCase):
     CFG = """version: 1
 owners: ["111"]

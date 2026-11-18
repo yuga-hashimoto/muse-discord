@@ -522,6 +522,20 @@ LINK_WORKERS = 2
 # conversation.
 SUMMARY_CHARS = 1400
 SUMMARY_SEEN_CHARS = 600  # how much of it a queue item carries
+# Other places' summaries ride along (B): name + a short digest, same
+# server only, never a DM in a public channel. Enough to follow a
+# conversation that moved without shipping raw history across places.
+SUMMARY_INDEX_MAX = 8
+SUMMARY_INDEX_CHARS = 220
+
+# Free replies are gated (F): a worker wake costs a run, so only a
+# message that plausibly wants the Muse wakes one — the owner, its name,
+# a question, or an exchange it was recently part of. Everything the
+# gate drops is still recorded in history, so the next wake sees it.
+FREE_GATE = _cfg_onoff(_ENGINE, "free_gate", True, f"{_ENG}.free_gate")
+FREE_GATE_MINUTES = _cfg_num(_ENGINE, "free_gate_minutes", 10, float,
+                             f"{_ENG}.free_gate_minutes", minimum=0)
+FREE_GATE_MAX_PER_MINUTE = 6
 
 # Generated media: when the media settings grant permission on a queue
 # item (media_permission), the worker may write generated files into
@@ -4309,6 +4323,89 @@ def free_reply(msg, replies, author):
     return bool(info.get("thread")) and replies == "conversational"
 
 
+_FREE_WAKES = {}   # channel id -> wake times in the last minute
+
+
+def bot_spoke_recently(state, channel_id, minutes):
+    """True when the bot said something in this channel (or, in a thread,
+    in its parent) within *minutes*: an exchange is going on."""
+    if minutes <= 0:
+        return False
+    cutoff = time.time() - minutes * 60
+    for entry in history_window(state, channel_id):
+        if entry.get("bot") and _snowflake_ts(entry["id"]) >= cutoff:
+            return True
+    return False
+
+
+def free_wakeable(msg, state, author):
+    """Whether a message that addressed nobody is worth a worker wake.
+
+    The gate only decides who wakes the worker; it never decides what is
+    remembered: every message is recorded in history before it is
+    classified, so a dropped one is part of the next wake's context.
+    A flood in one channel only gets the owner through.
+    """
+    if not FREE_GATE:
+        return True
+    uid = str(author.get("id") or "")
+    owner = uid in OWNER_USER_IDS
+    text = msg.get("content") or ""
+    low = text.lower()
+    want = owner
+    if not want:
+        for name in (BOT_NAME, "muse", "\u30df\u30e5\u30fc\u30ba",
+                     "\u307f\u3085\u30fc\u305a"):
+            if name and name.lower() in low:
+                want = True          # called by name
+                break
+    if not want and ("?" in text or "\uff1f" in text):
+        want = True                  # a question, asked into the room
+    if not want and bot_spoke_recently(state, msg.get("channel_id"),
+                                       FREE_GATE_MINUTES):
+        want = True                  # mid-conversation with someone
+    if not want:
+        return False
+    channel_id = str(msg.get("channel_id") or "")
+    now = time.time()
+    recent = [t for t in _FREE_WAKES.get(channel_id, []) if now - t < 60]
+    if not owner and len(recent) >= FREE_GATE_MAX_PER_MINUTE:
+        _FREE_WAKES[channel_id] = recent
+        return False                 # too many maybes: only the owner now
+    recent.append(now)
+    _FREE_WAKES[channel_id] = recent
+    return True
+
+
+def summary_index(state, channel_id, gid=None, dm=False):
+    """Other places' summaries (B): [{"place", "text", "min"}], newest
+    first. Same server only in a server (a DM's summary never reaches a
+    channel, and another server's neither); in a DM, other DMs only."""
+    store = state.get("summaries") or {}
+    out, now = [], time.time()
+    for cid, entry in store.items():
+        cid = str(cid)
+        if cid == str(channel_id) or not isinstance(entry, dict):
+            continue
+        text = str(entry.get("text") or "").strip()
+        if not text:
+            continue
+        info = CHANNELS.get(cid) or {}
+        here_is_dm = bool(dm)
+        there_is_dm = not info.get("guild_id")
+        if here_is_dm != there_is_dm:
+            continue         # a DM never mixes with a server, either way
+        if not here_is_dm and str(info.get("guild_id")) != str(gid):
+            continue         # another server's business
+        name = (DM_CHANNELS.get(cid) if there_is_dm
+                else channel_display(info)) or "?"
+        age = int(max(0.0, now - float(entry.get("at") or 0)) // 60)
+        out.append({"place": name, "text": text[:SUMMARY_INDEX_CHARS],
+                    "min": age})
+    out.sort(key=lambda e: e["min"])
+    return out[:SUMMARY_INDEX_MAX]
+
+
 def trigger_verdict(msg, guild_id=None, state=None):
     """trigger_kind plus why: (kind, refusal). refusal is set only when
     the message addresses the bot directly (addresses_bot) and the
@@ -4336,8 +4433,11 @@ def trigger_verdict(msg, guild_id=None, state=None):
     if direct:
         kind = "mention"
     elif free_reply(msg, replies, author):
-        # Nobody was addressed, but this is a conversation the bot is in:
-        # the worker decides whether it is for it (FREEDOM in its prompt).
+        # Nobody was addressed, but this is a conversation the bot is in.
+        # A cheap gate decides whether it is worth a wake at all; the
+        # worker still decides whether to answer (FREEDOM in its prompt).
+        if not free_wakeable(msg, state, author):
+            return None, None
         kind = "free"
     elif state is not None and replies == "conversational" \
             and follow_up_open(state, msg):
@@ -5586,6 +5686,68 @@ def fetch_link(url):
     return (title, text) if (title or text) else None
 
 
+# Discord links (C): a message or thread link in the chat is read with the
+# bot's own token, so the worker gets what was said instead of a URL it
+# cannot open. A DM link is never followed (a link must not pull a private
+# channel into a public reply), and neither is a channel the bot cannot
+# read: the API's own 403 answers that.
+DISCORD_LINK_RE = re.compile(
+    r"https?://(?:www\.)?(?:discord|discordapp)\.com/channels/"
+    r"(\d+)/(\d+)(?:/(\d+))?")
+
+
+def discord_link_parts(url):
+    """(guild id, channel id, message id or None) for a Discord link that
+    points at a message or a thread, or None (a plain invite, a server
+    link)."""
+    m = DISCORD_LINK_RE.match(str(url or "").strip().strip("<*>").split("?")[0])
+    if not m:
+        return None
+    return (m.group(1), m.group(2), m.group(3))
+
+
+def resolve_discord_link(url):
+    """(title, text) for a Discord message or thread link the bot may read,
+    or None. Never a DM, never a channel it cannot read."""
+    parts = discord_link_parts(url)
+    if not parts:
+        return None
+    _gid, cid, mid = parts
+    try:
+        channel = api_get(f"/channels/{cid}") or {}
+    except Exception:
+        return None
+    if channel.get("type") == 1:
+        return None                  # a DM: never pulled into a reply
+    if not channel.get("id"):
+        return None
+    name = channel.get("name") or cid
+    if mid:
+        try:
+            msg = api_get(f"/channels/{cid}/messages/{mid}") or {}
+        except Exception:
+            return None
+        author = ((msg.get("author") or {}).get("username")) or "?"
+        body = " ".join((msg.get("content") or "").split())
+        if not body:
+            return None
+        return (f"Discord: {author} in #{name}",
+                f"{author}: {body}"[:LINK_TEXT_CHARS])
+    try:
+        msgs = api_get(f"/channels/{cid}/messages?limit=6") or []
+    except Exception:
+        return None
+    lines = []
+    for msg in reversed(msgs):
+        who = ((msg.get("author") or {}).get("username")) or "?"
+        body = " ".join((msg.get("content") or "").split())
+        if body:
+            lines.append(f"{who}: {body}")
+    if not lines:
+        return None
+    return (f"Discord: #{name}", "\n".join(lines)[:LINK_TEXT_CHARS])
+
+
 _LINKS = {}                # message id -> {"urls", "at", "items": {url: page}}
 _LINKS_LOCK = threading.Lock()
 _LINK_SLOTS = threading.Semaphore(LINK_WORKERS)
@@ -5594,7 +5756,8 @@ _LINK_SLOTS = threading.Semaphore(LINK_WORKERS)
 def _link_fetch(url, entry):
     """One background fetch: fills entry["items"][url] (None = pending)."""
     with _LINK_SLOTS:
-        got = fetch_link(url)
+        got = (resolve_discord_link(url) if discord_link_parts(url)
+               else fetch_link(url))
     with _LINKS_LOCK:
         entry["items"][url] = ({"url": url, "title": got[0], "text": got[1]}
                                if got else {"url": url, "error": True})
@@ -6714,6 +6877,8 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         "links": links,
         "history": history,
         "summary": channel_summary(state, msg["channel_id"]),
+        # Other places' summaries (B), same server (or DMs, in a DM).
+        "summaries": summary_index(state, msg["channel_id"], guild_id, dm),
         # What the Muse has learned about its owner, everywhere (privacy.
         # memory: nothing leaves it out here; the card says what may be
         # used in front of others).

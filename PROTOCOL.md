@@ -99,8 +99,9 @@ an item no longer in the queue is refused. Item fields:
 | `documents` | Extracted attachment text: `[{name, content_type, text}]` (truncated) |
 | `unviewable` | Attachments that could not be made viewable |
 | `audio` | Voice notes and audio attachments, downloaded: `[{name, path, content_type}]`; the worker runs `bin/transcribe.py` on each (it is the only file it may open besides the prompt and media) |
-| `links` | Pages a link in the message points at, read by the monitor: `[{url, title, text}]` (text truncated; https only, public addresses only, at most 2 per message) |
+| `links` | Pages a link in the message points at, read by the monitor: `[{url, title, text}]` (text truncated; https only, public addresses only, at most 2 per message). A Discord message or thread link is read with the bot's token instead — never a DM, never a channel it cannot read |
 | `summary` | The summary the worker last wrote for this channel (Summaries), else `""` (a thread falls back to its parent's) |
+| `summaries` | Other places' summaries: `[{place, text, min}]`, same server only (a DM's never reaches a channel, another server's neither; in a DM, other DMs only) |
 | `muse_memory` | The Muse's memory file (MEMORY.md), truncated: what it knows about its owner, the same in every thread and channel (empty when `privacy.memory` is `nothing`) |
 | `thread_ok` | Whether a reply here may live in a thread of its own: `engine.thread_replies`, and the place's `style.threads` |
 | `history` | Up to 8 channel messages before the trigger: `[{id, author, author_id, bot, webhook?, display?, text, ts}]`, text cut to 300 characters |
@@ -513,6 +514,11 @@ free reply (`who.bots`), and every other gate still applies
 (`who.allow`, `who.ignore`, the caps, the injection filter). The item
 carries the thread's and its parent channel's recent messages, so the
 conversation keeps its context on both sides.
+
+A free message wakes the worker only when it plausibly wants it
+(`engine.free_gate`): the owner, its name, a question, or an exchange it
+was recently part of. A gate-dropped message is never lost — it was
+recorded in history before classification, so the next wake reads it.
 
 ### Follow-ups
 
@@ -1385,6 +1391,8 @@ and backoff); 0 is honoured where it means something.
 | `engine.thread_mention` | same | off | Ping the author in the new thread's first message, so the reply is noticed |
 | `engine.ack_reactions` | same | off | 👀 on a queued message, then ✅ (replied), ❌ (given up) or nothing (the worker chose silence) |
 | `engine.transcribe_command` | same | none | Speech-to-text for voice messages, run by the worker through `bin/transcribe.py`: a command using `{file}` |
+| `engine.free_gate` | same | on | Free replies (in a thread, or where `who.replies` is `free`) wake the worker only for a message that plausibly wants it; a dropped one is still recorded in history |
+| `engine.free_gate_minutes` | same | 10 | "Recently part of the conversation": the bot spoke in this channel within this many minutes (0: never) |
 | `engine.guild_ids` | `bot.guild_ids` | `[]` | Only these servers; empty: every server |
 
 ### Old settings

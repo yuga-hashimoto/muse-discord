@@ -61,6 +61,7 @@ ENGINE_KEYS = {
     "coalesce_seconds": None, "max_reply_chars": None, "guild_ids": None,
     "thread_replies": None, "thread_mention": None,
     "ack_reactions": None, "transcribe_command": None,
+    "free_gate": None, "free_gate_minutes": None,
     "sweep": {"every_cycles", "grace_seconds", "max_age_hours",
               "max_recoveries"},
     "backoff": {"initial_seconds", "max_seconds"},

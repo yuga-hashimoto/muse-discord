@@ -164,6 +164,12 @@ engine:
                           # a new thread is otherwise only an unread badge
   ack_reactions: on       # put 👀 on a message while it is being answered,
                           # then ✅ (or ❌ when the reply was given up)
+  free_gate: on           # in a thread (or where replies are free), wake
+                          # the worker only for a message that plausibly
+                          # wants it: the owner, its name, a question, or an
+                          # exchange it was recently part of. Dropped ones
+                          # still go into the history it reads next time
+  free_gate_minutes: 10   # "recently part of" = it spoke here this long ago
   transcribe_command: ""  # speech-to-text for voice messages, run by the
                           # worker: a command using {file}, such as
                           # "whisper-cli -m /models/ggml-base.bin -f {file}".
