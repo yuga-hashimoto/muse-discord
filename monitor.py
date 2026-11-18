@@ -5811,7 +5811,12 @@ def resolve_discord_link(url):
     _gid, cid, mid = parts
     try:
         channel = api_get(f"/channels/{cid}") or {}
-    except Exception:
+    except Exception as e:
+        # Named, once per occurrence: a 404 here means the message or
+        # thread is gone (or the link is to something not a channel),
+        # not that the network hiccuped.
+        print(f"Discord link not read ({getattr(e, 'code', '?')}): "
+              f"{url[:120]}", flush=True)
         return None
     if channel.get("type") == 1:
         return None                  # a DM: never pulled into a reply
@@ -5821,7 +5826,9 @@ def resolve_discord_link(url):
     if mid:
         try:
             msg = api_get(f"/channels/{cid}/messages/{mid}") or {}
-        except Exception:
+        except Exception as e:
+            print(f"Discord link not read ({getattr(e, 'code', '?')}): "
+                  f"{url[:120]}", flush=True)
             return None
         author = ((msg.get("author") or {}).get("username")) or "?"
         body = " ".join((msg.get("content") or "").split())
