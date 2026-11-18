@@ -9,6 +9,7 @@ MUT_DIR is the package tree under test (default: this checkout)."""
 import atexit
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -44,6 +45,23 @@ def scratch(prefix="muse-test-"):
     if not _KEEP:
         atexit.register(shutil.rmtree, d, True)
     return d
+
+
+def unshare_works():
+    """True when this box can actually run the sandbox the watchdog suites
+    need: a user + PID namespace with /proc mounted, so their pgrep/pkill
+    only ever see the fakes. Having the unshare binary is not enough —
+    some VMs (and macOS) allow the binary but refuse to mount /proc inside
+    a user namespace, so try the exact call once."""
+    if shutil.which("unshare") is None:
+        return False
+    try:
+        r = subprocess.run(
+            ["unshare", "--user", "--map-root-user", "--pid", "--fork",
+             "--mount-proc", "true"], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
 
 
 def copy_watchdog(dst_dir):

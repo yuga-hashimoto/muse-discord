@@ -18,12 +18,13 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_lib"))
 from common import (FAKEWS, HOOK_RUNTIME as RUNTIME, MUT_DIR,  # noqa: E402
-                    copy_watchdog)
+                    copy_watchdog, unshare_works)
 
 if os.environ.get("FR_IN_NS") != "1":
-    if shutil.which("unshare") is None:
-        # No unshare (macOS): nothing to run, and nothing to fake.
-        print("fastrestart: skipped (unshare is Linux-only)")
+    if not unshare_works():
+        # No usable sandbox (macOS, or a VM that forbids mounting /proc
+        # in a user namespace): nothing to run, and nothing to fake.
+        print("fastrestart: skipped (no usable unshare sandbox)")
         sys.exit(0)
     env = dict(os.environ, FR_IN_NS="1")
     # bash (not python) as PID 1: it reaps the orphaned daemons.

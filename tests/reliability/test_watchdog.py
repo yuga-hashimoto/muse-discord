@@ -12,7 +12,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "_lib"))
-from common import FAKE_PROC, FAKEWS, copy_watchdog, scratch  # noqa: E402
+from common import (FAKE_PROC, FAKEWS, copy_watchdog, scratch,  # noqa: E402
+                    unshare_works)
 
 
 def scenario(steps, env=None, token_file=True, token_env=None,
@@ -64,8 +65,10 @@ _results = {}
 
 
 def setUpModule():
-    if shutil.which("unshare") is None:
-        raise unittest.SkipTest("unshare is Linux-only (macOS has none)")
+    if not unshare_works():
+        raise unittest.SkipTest("no usable unshare sandbox "
+                                "(unshare missing, or no /proc in a "
+                                "user namespace)")
     with concurrent.futures.ThreadPoolExecutor(len(SCENARIOS)) as pool:
         futs = {name: pool.submit(scenario, steps, **kw)
                 for name, (steps, kw) in SCENARIOS.items()}

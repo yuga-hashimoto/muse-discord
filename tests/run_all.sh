@@ -67,7 +67,7 @@ for s in "${SUITES[@]}"; do
   fi
   if [ -f "$TESTS/$s/SLOW" ]; then
     [ "$SKIP_SLOW" = 1 ] && { echo "skip  $s (slow)"; continue; }
-    ordered=("$s" "${ordered[@]}")
+    ordered=("$s" ${ordered[@]+"${ordered[@]}"})
   else
     ordered+=("$s")
   fi

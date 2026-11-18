@@ -19,7 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_lib"))
 import monitor_harness as H  # noqa: E402
 from common import (FAKE_PROC, FAKEWS, HOOK_RUNTIME as RUNTIME,  # noqa: E402
-                    MUT_DIR, copy_watchdog, scratch)
+                    MUT_DIR, copy_watchdog, scratch, unshare_works)
 
 V0 = "v1.0.0"
 V1 = "v1.1.0"
@@ -370,8 +370,9 @@ class Watchdog(unittest.TestCase):
     """Real watchdog.sh runs; the tests run at once (load_tests)."""
 
     def setUp(self):
-        if shutil.which("unshare") is None:
-            self.skipTest("unshare is Linux-only (macOS has none)")
+        if not unshare_works():
+            self.skipTest("no usable unshare sandbox (unshare missing, "
+                          "or no /proc in a user namespace)")
         self.d = tmpdir("wd_")
         self.origin = os.path.join(self.d, "origin.git")
         self.seed = os.path.join(self.d, "seed")
