@@ -411,6 +411,7 @@ ACK_SEEN, ACK_DONE, ACK_FAILED = "\N{EYES}", "\N{WHITE HEAVY CHECK MARK}", "\N{C
 # Discord's limits: a thread's name, and one of its four archive delays.
 THREAD_NAME_CHARS = 100
 THREAD_ARCHIVE_MINUTES = 1440
+THREAD_CREATE_TRIES = 3   # a thread create that dies in transit is retried
 
 
 def _load_token():
@@ -5128,14 +5129,27 @@ def reply_thread(channel_id, message_id, name_hint=""):
     known = _REPLY_THREADS.get(channel_id) or {}
     if known.get(message_id):
         return known[message_id]
-    try:
-        th = api_post(
-            f"/channels/{channel_id}/messages/{message_id}/threads",
-            {"name": reply_thread_name(name_hint),
-             "auto_archive_duration": THREAD_ARCHIVE_MINUTES})
-    except Exception as e:
+    # A create that dies in transit (IncompleteRead, RemoteDisconnected,
+    # a timeout) is retried before falling back: a thread that is merely
+    # late is worth more than an inline reply nobody wanted there. 400
+    # and 403 are answers, not accidents, and are handled below.
+    th, last_err = None, None
+    for attempt in range(THREAD_CREATE_TRIES):
+        try:
+            th = api_post(
+                f"/channels/{channel_id}/messages/{message_id}/threads",
+                {"name": reply_thread_name(name_hint),
+                 "auto_archive_duration": THREAD_ARCHIVE_MINUTES})
+            break
+        except Exception as e:
+            last_err = e
+            code = getattr(e, "code", None)
+            if code in (400, 403) or attempt == THREAD_CREATE_TRIES - 1:
+                break
+            time.sleep(0.6 * (attempt + 1))
+    if th is None:
+        e = last_err or Exception("no attempt")
         code = getattr(e, "code", None)
-        th = None
         if code == 400:
             # One is already there: a retry after a restart, or someone
             # started one first. Discord carries it on the message.
