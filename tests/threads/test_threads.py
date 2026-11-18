@@ -724,6 +724,63 @@ class DiscordLinks(unittest.TestCase):
             f"https://discord.com/channels/1/{cid}"))
 
 
+class OwnerRemember(unittest.TestCase):
+    """D: remember from an owner's own server message, their own words
+    only, into the same MEMORY.md."""
+
+    def store(self, st, kind="mention", uid="111", **meta):
+        mid = sf()
+        st.setdefault("item_meta", {})[mid] = dict(
+            {"kind": kind, "author_id": uid, "channel_id": CH}, **meta)
+        return mid
+
+    def check(self, mod, st, mid, facts=("Likes tea",)):
+        index = {"frags": {}, "owners": set()}
+        return mod.remember_check(
+            st, {"remember": list(facts), "reply_to": mid,
+                 "channel_id": CH}, mid, index)
+
+    def test_an_owners_server_message_can_be_remembered(self):
+        mod = load()
+        st = mod.load_state()
+        mid = self.store(st)
+        why, t = self.check(mod, st, mid)
+        self.assertIsNone(why)
+        self.assertEqual(t, mid)
+
+    def test_a_strangers_message_cannot(self):
+        mod = load()
+        st = mod.load_state()
+        why, t = self.check(mod, st, self.store(st, uid="222"))
+        self.assertIsNone(t)          # refused: a stranger writes nothing
+        self.assertTrue(why)
+
+    def test_a_quote_forward_or_attachment_cannot(self):
+        mod = load()
+        st = mod.load_state()
+        for meta in ({"forwarded": True}, {"has_inputs": True},
+                     {"bot": True}):
+            with self.subTest(meta):
+                why, t = self.check(mod, st, self.store(st, **meta))
+                self.assertIsNone(t)
+                self.assertTrue(why)
+
+    def test_it_lands_in_the_memory_file(self):
+        mod = load()
+        st = mod.load_state()
+        path = os.path.join(mod.TMP, "MEMORY.md")
+        with open(path, "w") as f:
+            f.write("")
+        mod.MEMORY_FILE = path
+        mod._MEMORY_TEXT.update(mtime=None, text="")
+        mid = self.store(st)
+        mod.save_facts(st, {"remember": ["Likes tea"], "channel_id": CH}, mid)
+        with open(path) as f:
+            body = f.read()
+        self.assertIn("Likes tea", body)
+        self.assertIn("Discord server", body)
+
+
 class TheSetting(unittest.TestCase):
     CFG = """version: 1
 owners: ["111"]

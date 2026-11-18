@@ -3602,15 +3602,31 @@ def remember_check(state, item, qid, index):
     if not item.get("remember"):
         return None, None
     t = trigger_of(state, qid, index["frags"]) if qid else None
-    if not t or not (is_owner_dm_item(state, t) or t in index["owners"]):
-        return "remember: only in an owner's own DM", None
-    want = ((state.get("nl_nonces") or {}).get(t) or {}).get("nonce")
-    got, _problem = item_nonce(item)
-    if not want or not got or not hmac.compare_digest(
-            str(want).encode(), got.encode("utf-8", "replace")):
-        return "remember: needs the owner DM's live nonce", None
+    if not t:
+        return "remember: no message to remember from", None
     meta = (state.get("item_meta") or {}).get(t) or {}
-    if meta.get("kind") != "dm" or not meta.get("owner_dm") \
+    dm = is_owner_dm_item(state, t) or t in index["owners"]
+    if dm:
+        want = ((state.get("nl_nonces") or {}).get(t) or {}).get("nonce")
+        got, _problem = item_nonce(item)
+        if not want or not got or not hmac.compare_digest(
+                str(want).encode(), got.encode("utf-8", "replace")):
+            return "remember: needs the owner DM's live nonce", None
+    elif meta.get("kind") not in ("mention", "free"):
+        return "remember: only an owner's own message", None
+    if not dm:
+        # A server item: refused outright (not merely skipped) unless it is
+        # the owner's own words — an attempt to write the Muse's memory
+        # from someone else's message is worth setting aside where it can
+        # be seen.
+        if str(meta.get("author_id")) not in OWNER_USER_IDS \
+                or meta.get("bot"):
+            return "remember: only an owner's own message", None
+        if meta.get("forwarded") or meta.get("has_inputs"):
+            return ("remember: not from a quote, a forward or an "
+                    "attachment", None)
+        return None, t
+    if not meta.get("owner_dm") \
             or str(meta.get("author_id")) not in OWNER_USER_IDS \
             or meta.get("forwarded") or meta.get("has_inputs"):
         print(f"Not saving facts from owner DM {t} to memory: not the "
@@ -3621,14 +3637,18 @@ def remember_check(state, item, qid, index):
 
 
 def save_facts(state, item, t):
-    """Append item's remember facts (owner DM t, from remember_check)
-    to MEMORY_FILE, once per owner DM. Never raises."""
+    """Append item's remember facts (t, from remember_check: an owner's own
+    DM or own server message) to MEMORY_FILE, once per message. The file
+    is the Muse's canonical long-term memory, shared with its main chat:
+    this only appends to it, never keeps a second copy. Never raises."""
     if not t or not item.get("remember"):
         return
     done = state.setdefault("remembered", {})
     if t in done:
         return                 # a resend of an item already saved
-    if not settings().top("memory.save_dms"):
+    meta = (state.get("item_meta") or {}).get(t) or {}
+    in_dm = meta.get("kind") == "dm"
+    if in_dm and not settings().top("memory.save_dms"):
         print("Not saving facts to memory: memory.save_dms is off.",
               flush=True)
         return
@@ -3652,7 +3672,9 @@ def save_facts(state, item, t):
         line = memory_line(flat)
         if not line or n + len(lines) >= MEMORY_PER_DAY:
             continue
-        lines.append(f"- {today} (told me in a Discord DM): {line}\n")
+        where = ("told me in a Discord DM" if in_dm
+                 else "said in a Discord server")
+        lines.append(f"- {today} ({where}): {line}\n")
     if lines:
         try:
             with open(MEMORY_FILE, "rb") as f:

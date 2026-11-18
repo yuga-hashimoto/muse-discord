@@ -144,7 +144,7 @@ anything appended meanwhile. Fields:
 | `settings` | A settings request, owner DMs only (Settings requests) |
 | `schedule` | Reminders and watches to add or cancel (The schedule action) |
 | `proactive` | `"opt-out"` or `"opt-in"` ("Stop messaging me") |
-| `remember` | Facts for the Muse's memory, owner DMs only (Owner memory) |
+| `remember` | Facts for the Muse's memory: an owner's own DM, or an owner's own server message (Owner memory) |
 | `summary` | A few sentences on the conversation, kept per channel for the next run (Summaries) |
 | `thread_title` | A better name for the reply's thread, when one was started |
 
@@ -312,20 +312,28 @@ nothing but owner DMs:
 
 ### Owner memory
 
-What an owner tells the bot in their own DM reaches the Muse's own
-memory, so the Muse knows it in its other chats:
+What an owner tells the bot in their own DM — or in their own message
+in a server — reaches the Muse's own memory, so the Muse knows it in its
+other chats. That file is the Muse's canonical long-term memory (its
+main chat reads the same one): the monitor appends to it and never keeps
+a second copy.
 
 - The worker lists lasting facts in the reply's `remember` (a list of
   strings, at most 5 used). Once the reply is sent (or settled as
   silent), the monitor appends each, as one line `- <UTC day> (told me
-  in a Discord DM): <fact>`, to the Muse's memory file: `~/MEMORY.md`
+  in a Discord DM | said in a Discord server): <fact>`, to that file:
+  `~/MEMORY.md`
   of the user the monitor runs as (on Muse, the Muse's own), or
   `MUSE_MEMORY_FILE` in the monitor's environment. A missing file is
   never created (logged once).
 - Only for an outbox item that answers an owner's own DM with its live
-  `owner_dm_nonce` (Owner DMs); `remember` on any other item refuses
-  the item. Memory feeds the Muse itself, so a stranger's message must
-  never write there.
+  `owner_dm_nonce` (Owner DMs), or an owner's own message in a server
+  (`kind` `"mention"` or `"free"`, its `reply_nonce`); `remember` on any
+  other item refuses the item. Memory feeds the Muse itself, so a
+  stranger's message must never write there. In a server the run is not
+  privileged and the facts come from the owner's own words only: a
+  quote of someone else, a forward, an attachment or a reply to another
+  person's message is skipped.
 - Skipped (logged; the reply still goes out) unless the DM is the
   owner's own words: never for a reminder or watch notice (a fire's
   answer drops `remember`), a forwarded message, one with attachments

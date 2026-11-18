@@ -35,6 +35,9 @@ UPDATING.md walks a Muse through it.
 - Free replies are gated (`engine.free_gate`): the owner, its name, a
   question, or an exchange it was recently part of. Dropped messages
   still go into the history the next wake reads.
+- `remember` works from an owner's own server message too (their own
+  words only: never a quote, a forward or an attachment), into the same
+  MEMORY.md.
 - The Muse's memory file (MEMORY.md) rides on every item, and a thread
   shares its parent channel's recent history and summary: the same Muse
   in every thread and channel, not one per channel.
