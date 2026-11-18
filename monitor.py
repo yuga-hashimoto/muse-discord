@@ -3562,27 +3562,47 @@ MEMORY_FACTS_PER_ITEM = 5
 MEMORY_FACT_MAX = 300
 MEMORY_PER_DAY = 20
 MEMORY_TEXT_CHARS = 2000  # how much of it a queue item carries
+# The public half (A): what the Muse itself writes for public use. Never
+# required; when the file is absent, public replies carry no memory.
+PUBLIC_MEMORY_FILE = os.environ.get("MUSE_PUBLIC_MEMORY_FILE") \
+    or os.path.expanduser("~/MEMORY.public.md")
+PUBLIC_MEMORY_CHARS = 1200
 _MEMORY_TEXT = {"mtime": None, "text": ""}
 _MEMORY_MISSING = {"logged": False}
 
 
-def muse_memory():
-    """The Muse's memory file (MEMORY.md) as text, or "": what it has
-    learned about its owner, handed to the worker on every item so it is
-    the same Muse in every thread and every channel. Cached by mtime;
-    ordinary file reads, no network."""
+def _memory_text(path, cache, limit):
+    """A memory file's text, cached by mtime ("" when absent). Ordinary
+    file reads, no network."""
     try:
-        mtime = os.path.getmtime(MEMORY_FILE)
+        mtime = os.path.getmtime(path)
     except OSError:
         return ""
-    if _MEMORY_TEXT["mtime"] != mtime:
+    if cache["mtime"] != mtime:
         try:
-            with open(MEMORY_FILE, encoding="utf-8", errors="replace") as f:
+            with open(path, encoding="utf-8", errors="replace") as f:
                 text = f.read()
         except OSError:
             return ""
-        _MEMORY_TEXT.update(mtime=mtime, text=text)
-    return _MEMORY_TEXT["text"].strip()[:MEMORY_TEXT_CHARS]
+        cache.update(mtime=mtime, text=text)
+    return cache["text"].strip()[:limit]
+
+
+def muse_memory():
+    """The Muse's own long-term memory (MEMORY.md), for an owner-mode run
+    only: what it has learned, the same file its main chat reads."""
+    return _memory_text(MEMORY_FILE, _MEMORY_TEXT, MEMORY_TEXT_CHARS)
+
+
+_PUBLIC_MEMORY_TEXT = {"mtime": None, "text": ""}
+
+
+def public_memory():
+    """The Muse's public snapshot (~/MEMORY.public.md, or
+    MUSE_PUBLIC_MEMORY_FILE): what it wrote for anyone to see. Rides on
+    every item; absent file, absent memory."""
+    return _memory_text(PUBLIC_MEMORY_FILE, _PUBLIC_MEMORY_TEXT,
+                        PUBLIC_MEMORY_CHARS)
 
 
 def memory_line(text):
@@ -6873,6 +6893,11 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
     #    worker decides whether the message asks the bot to do something.
     owner_command = author_id in OWNER_USER_IDS \
         and bool(here["abilities.owner_commands"])
+    # Owner mode: the owner's own words. In a server the hook hands such an
+    # item out alone (no other item, no stranger's text in that run), which
+    # is what makes the wider memory safe there.
+    owner_mode = (author_id in OWNER_USER_IDS and not from_bot
+                  and (dm or (kind or "mention") in ("mention", "free")))
     # The worker replies under the LAST fragment, but the ledger and the
     # sweep track the trigger: remember which trigger each fragment
     # belongs to so a reply (or a silent pass) settles the whole burst.
@@ -6901,11 +6926,15 @@ def enqueue_message(msg, cname, state, queue, dm=False, fragments=None,
         "summary": channel_summary(state, msg["channel_id"]),
         # Other places' summaries (B), same server (or DMs, in a DM).
         "summaries": summary_index(state, msg["channel_id"], guild_id, dm),
-        # What the Muse has learned about its owner, everywhere (privacy.
-        # memory: nothing leaves it out here; the card says what may be
-        # used in front of others).
-        "muse_memory": "" if here["privacy.memory"] == "nothing"
-        else muse_memory(),
+        # Owner mode (A): this run answers the owner in their own words —
+        # their DM, or their own message in a server, which the hook wakes
+        # alone so no stranger's text rides along. Only then does the
+        # private memory file travel; every item gets the public snapshot.
+        "owner_mode": owner_mode,
+        "muse_memory": (muse_memory()
+                        if owner_mode and here["privacy.memory"] != "nothing"
+                        else ""),
+        "public_memory": public_memory(),
         # Whether this reply may live in a thread of its own: the engine
         # switch, and the place's style.threads (a channel can stay inline).
         "thread_ok": bool(THREAD_REPLIES and here["style.threads"]),

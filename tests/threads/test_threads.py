@@ -539,7 +539,7 @@ class SharedMemory(unittest.TestCase):
         st["guild_joined"] = {G1: 0}
         mod.CHANNELS = {CH: chan()}
         q = []
-        self.assertTrue(mod.enqueue_message(H.msg(CH, "222", "hi"), "Srv #general",
+        self.assertTrue(mod.enqueue_message(H.msg(CH, "111", "hi"), "Srv #general",
                                             st, q, guild_id=G1))
         self.assertIn("Likes tea", q[0]["muse_memory"])
 
@@ -556,7 +556,7 @@ class SharedMemory(unittest.TestCase):
         q = []
         mod.enqueue_message(H.msg(CH, "222", "hi"), "Srv #general", st, q,
                             guild_id=G1)
-        self.assertIn("Likes tea", q[0]["muse_memory"])  # default: public-only
+        self.assertEqual(q[0]["muse_memory"], "")   # not the owner: no private memory
 
 
 class FreeGate(unittest.TestCase):
@@ -779,6 +779,52 @@ class OwnerRemember(unittest.TestCase):
             body = f.read()
         self.assertIn("Likes tea", body)
         self.assertIn("Discord server", body)
+
+
+class OwnerMode(unittest.TestCase):
+    """A: the owner's own words get the private memory; everyone gets the
+    public snapshot only."""
+
+    def item_for(self, mod, st, uid="111", kind="mention"):
+        mod.CHANNELS[CH] = chan()
+        q = []
+        mod.enqueue_message(H.msg(CH, uid, "hi"), "Srv #general", st, q,
+                            guild_id=G1, kind=kind)
+        return q[0]
+
+    def setUp(self):
+        self.mod = load()
+        self.st = self.mod.load_state()
+        self.st["guild_joined"] = {G1: 0}
+        private = os.path.join(self.mod.TMP, "MEMORY.md")
+        public = os.path.join(self.mod.TMP, "MEMORY.public.md")
+        with open(private, "w") as f:
+            f.write("PRIVATE: likes tea\n")
+        with open(public, "w") as f:
+            f.write("PUBLIC: builds a Discord bot\n")
+        self.mod.MEMORY_FILE = private
+        self.mod.PUBLIC_MEMORY_FILE = public
+        self.mod._MEMORY_TEXT.update(mtime=None, text="")
+        self.mod._PUBLIC_MEMORY_TEXT.update(mtime=None, text="")
+
+    def test_the_owner_gets_the_private_memory(self):
+        item = self.item_for(self.mod, self.st)
+        self.assertTrue(item["owner_mode"])
+        self.assertIn("PRIVATE", item["muse_memory"])
+        self.assertIn("PUBLIC", item["public_memory"])
+
+    def test_everyone_else_gets_only_the_public_one(self):
+        item = self.item_for(self.mod, self.st, uid="222")
+        self.assertFalse(item["owner_mode"])
+        self.assertEqual(item["muse_memory"], "")
+        self.assertIn("PUBLIC", item["public_memory"])
+
+    def test_a_bot_never_gets_owner_mode(self):
+        self.mod.CHANNELS[CH] = chan()
+        q = []
+        self.mod.enqueue_message(H.msg(CH, "999", "hi", bot=True),
+                                 "Srv #general", self.st, q, guild_id=G1)
+        self.assertFalse(q[0]["owner_mode"])
 
 
 class TheSetting(unittest.TestCase):
