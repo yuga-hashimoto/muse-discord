@@ -101,6 +101,11 @@ The values' and settings' names work too ("Only when @mentioned",
 Instructions, and on/off for images and video, reaching out and an
 installed plugin (`plugins.<name>.enabled`).
 
+An @mention means the bot itself or a role it holds: mentioning the
+`@Muse` role wakes every Muse that has it, and a role the bot is not
+in is someone else's conversation (the role must be mentionable in
+Discord's role settings). `@everyone` / `@here` never wake it.
+
 The Friends preset turns reaching out on for its server; Community
 and Work turn it off. `preset friends` is refused for a server of more
 than 50 members, because it would let the bot use everything it

@@ -91,7 +91,7 @@ an item no longer in the queue is refused. Item fields:
 | `channel_id` | Channel to reply in |
 | `channel_name` | e.g. `"My Server #general"`, or `"DM with <name>"` |
 | `guild_id` | Server id, or null for DMs |
-| `kind` | `"mention"` (an @mention or a reply to the bot), `"dm"`, or `"free"` (where `who.replies` is `free`: said without addressing anyone, so the worker decides; never in a thread); the monitor's own: `"reminder"`, `"watch-met"` (Reminders and watches), `"proactive"` (Unprompted messages) |
+| `kind` | `"mention"` (an @mention of the bot or of a role it holds, or a reply to the bot), `"dm"`, or `"free"` (where `who.replies` is `free`: said without addressing anyone, so the worker decides; never in a thread); the monitor's own: `"reminder"`, `"watch-met"` (Reminders and watches), `"proactive"` (Unprompted messages) |
 | `author`, `author_id` | Who wrote it |
 | `content` | The text; for a burst, all fragments joined oldest-first |
 | `timestamp` | ISO time of the trigger |
@@ -483,8 +483,8 @@ covers them.
 
 Enforced by the monitor before anything is queued:
 
-- **Strict triggers.** Only direct address queues work: an @mention,
-  a reply to the bot, or a DM, plus follow-ups where `who.replies` is
+- **Strict triggers.** Only direct address queues work: an @mention
+  of the bot itself or of a role it holds, a reply to the bot, or a DM, plus follow-ups where `who.replies` is
   `conversational` (the default, outside threads), plus free replies
   where `who.replies` is `free` (Free replies). A thread is
   mention-only. Other bots count as
@@ -513,7 +513,8 @@ Enforced by the monitor before anything is queued:
 ### Free replies
 
 A thread is mention-only. A message there reaches the worker only when
-it @mentions the bot or replies to one of its messages; a thread the
+it @mentions the bot (or a role the bot holds) or replies to one of
+its messages; a thread the
 bot spoke in before is not a standing invitation, and the follow-up
 window does not open in threads. When a mention does wake it in a
 thread the bot has not been reading, the monitor reads that thread's
@@ -548,8 +549,9 @@ window, so a person can keep talking without mentioning the bot:
   opened. Every bot reply to them there restarts it; their own
   messages never extend it.
 - It closes when they address someone else: a reply to another user,
-  or a message that mentions another user, a role, `@everyone` or
-  `@here` and not the bot. That message is not a follow-up.
+  or a message that mentions another user, a role the bot does not
+  hold, `@everyone` or `@here` and not the bot. That message is not a
+  follow-up.
 - A follow-up goes through the same coalescing, gates, caps and typing
   as a mention, queued with `follow_up: true`. The worker answers it
   `silent` when it is not for the bot.

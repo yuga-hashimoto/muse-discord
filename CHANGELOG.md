@@ -41,10 +41,16 @@ UPDATING.md walks a Muse through it.
 - The Muse's memory file (MEMORY.md) rides on every item, and a thread
   shares its parent channel's recent history and summary: the same Muse
   in every thread and channel, not one per channel.
+- Role mentions count as @mentions: pinging a role the bot itself holds
+  (a server's `@Muse` role, say) wakes every bot that has it, in
+  channels and threads alike. A role it does not hold is somebody
+  else's conversation, and `@everyone` / `@here` still never trigger.
+  The role has to be mentionable in Discord's role settings.
 
 **Action needed**: an existing install re-invites the bot (the invite now
 asks for Create Public Threads) to use thread replies; voice messages
-need a `transcribe_command` in `config.yaml`.
+need a `transcribe_command` in `config.yaml`. Role mentions need no
+setting and no new permission: update and restart the monitor.
 
 ## v1.0.0 (2026-10-22): First release
 

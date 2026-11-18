@@ -1837,14 +1837,23 @@ def open_follow_up(state, channel_id, user_id):
 
 def addresses_someone_else(msg):
     """A Discord reply to someone else's message, or an @mention of
-    another user or a role (the bot's own mention is direct address)."""
+    another user, a role the bot does not hold, `@everyone` or `@here`
+    (the bot's own mention — a user @mention or one of its roles — is
+    direct address)."""
     if msg.get("message_reference"):
         rm = msg.get("referenced_message") or {}
         if _who(rm).get("id") != BOT_ID:
             return True
     if any((m or {}).get("id") != BOT_ID for m in msg.get("mentions") or []):
         return True
-    return bool(msg.get("mention_roles") or msg.get("mention_everyone"))
+    if msg.get("mention_everyone"):
+        return True
+    roles = set(msg.get("mention_roles") or [])
+    if not roles:
+        return False
+    gid = msg.get("guild_id") \
+        or (CHANNELS.get(msg.get("channel_id")) or {}).get("guild_id")
+    return bool(roles - own_role_ids(gid))
 
 
 def follow_up_open(state, msg):
@@ -4278,15 +4287,35 @@ def register_commands(gateway_status=None):
     return result
 
 
+def own_role_ids(guild_id):
+    """The role ids the bot itself holds in this server. A mention of one
+    of them addresses the bot the same way an @mention does. Kept in the
+    who.allow role cache: one API call per server per ten minutes, and
+    none at all until a role mention shows up."""
+    if not guild_id:
+        return set()
+    return member_roles(guild_id, BOT_ID)
+
+
 def is_mention(msg):
-    """True when the message @mentions the bot on the platform. Plain
-    text containing the bot's name is NOT a mention: in a server whose
-    topic shares the bot's name, that made every casual "my muse ..." a
-    summons. Whether a bot author may trigger is trigger_kind's call."""
+    """True when the message @mentions the bot on the platform, or
+    mentions a role the bot itself holds (Discord puts role ids in
+    mention_roles, never in mentions). Plain text containing the bot's
+    name is NOT a mention: in a server whose topic shares the bot's name,
+    that made every casual "my muse ..." a summons. @everyone / @here are
+    not role mentions and never trigger. Whether a bot author may trigger
+    is trigger_kind's call."""
     author = _who(msg)
     if author.get("id") == BOT_ID:
         return False
-    return any(m.get("id") == BOT_ID for m in msg.get("mentions", []))
+    if any((m or {}).get("id") == BOT_ID for m in msg.get("mentions") or []):
+        return True
+    roles = set(msg.get("mention_roles") or [])
+    if not roles:
+        return False
+    gid = msg.get("guild_id") \
+        or (CHANNELS.get(msg.get("channel_id")) or {}).get("guild_id")
+    return bool(roles & own_role_ids(gid))
 
 
 def trigger_kind(msg, guild_id=None, state=None):
