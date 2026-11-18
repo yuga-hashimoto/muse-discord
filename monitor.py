@@ -138,36 +138,11 @@ NL = _import_local("settings_nl")      # settings requests in plain words
 W = _import_local("muse_watches")      # reminders and watches
 SCAN = _import_local("secret_scan")    # the outgoing secret filter
 
-# Anonymous daily usage counts (telemetry.py). Off with
-# telemetry.usage_stats: off or MUSE_DISCORD_TELEMETRY=off.
-TELEMETRY_FILE = os.path.join(BASE_DIR, "telemetry.json")
-TELEMETRY_ID_FILE = os.path.join(BASE_DIR, "telemetry_id")
-TELEMETRY_WAKES_FILE = os.path.join(BASE_DIR, "telemetry.wakes")
-
 
 class _NoTelemetry:
     def __getattr__(self, name):
         return lambda *a, **kw: ""
 
-
-def _import_telemetry():
-    """A telemetry.Recorder; a stand-in that does nothing when
-    telemetry.py cannot be loaded (it never stops the bot)."""
-    try:
-        spec = importlib.util.spec_from_file_location(
-            "muse_telemetry", os.path.join(BASE_DIR, "telemetry.py"))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod.Recorder(lambda: (TELEMETRY_FILE, TELEMETRY_ID_FILE,
-                                     TELEMETRY_WAKES_FILE),
-                            ms=MS, pkg_dir=BASE_DIR)
-    except Exception as e:
-        print(f"Telemetry not loaded ({type(e).__name__}); usage counts "
-              f"are off.", flush=True)
-        return _NoTelemetry()
-
-
-TM = _import_telemetry()
 
 
 # Reaching out on its own, unprompted (proactive.py; PROTOCOL.md,
@@ -1427,7 +1402,6 @@ def ledger_record_many(mids, status, reason="", channel_id=None,
         return
     d = _ledger_load()
     code = ledger_code(status, reason)
-    TM.ledger(code, [d["entries"].get(m) for m in mids])
     # Where it happened, as the monitor knows it now (a thread's parent
     # only for a thread): /settings' Why reads it later, when the
     # channel may be gone from discovery.
@@ -2356,14 +2330,6 @@ def announce_update(state):
         print(f"Update notice undeliverable to {', '.join(upd['owed'])}; "
               f"giving up.", flush=True)
         upd["owed"] = []
-
-
-def telemetry_notice():
-    """DM the owners once when usage stats have not reached their
-    endpoint for days (telemetry.py, take_notice)."""
-    text = TM.take_notice(settings)
-    if text:
-        notify_owners(text)
 
 
 def apply_record(state, rec):
@@ -5447,7 +5413,6 @@ def media_permission(state, scope, here, author_matches):
 def note_media_sent(state, scope):
     """Count one reply with generated files sent in scope, for every
     media.per_day counter it adds to (everywhere, its server, or DMs)."""
-    TM.count("media_sent")
     counts = _media_counts(state)
     counts["sent_today"] = counts.get("sent_today", 0) + 1
     for counter in MS.Settings.counter_ids(scope):
@@ -6533,7 +6498,6 @@ def classify_message(state, msg, channel_name, guild_id=None):
     if author.get("id") == BOT_ID:
         return None  # the bot's own messages: never triggers or fragments
     watch_scan(msg, guild_id)  # Discord watches (cheap; never raises)
-    TM.count("messages_seen")
     if is_bot_author(author) and settings().get(
             "who.bots", scope_for(guild_id, msg.get("channel_id"))) \
             == "ignore":
@@ -6645,7 +6609,6 @@ def check_dm_channel(dm_id, dm_name, state):
                 or m["id"] in gw_done \
                 or m.get("type", 0) not in CONVERSATION_TYPES:
             continue
-        TM.count("messages_seen")
         if not dm_sender_allowed(m.get("author")):
             note_dm_refused(m)
             continue
@@ -7334,7 +7297,6 @@ def _log_latency(state, qid, picked, sent):
         t0 = min(t0, picked)
         print(f"Latency {qid}: send {sent - picked:.1f}s, total "
               f"{sent - t0:.1f}s", flush=True)
-    TM.latency(sent - t0)
 
 
 # A failed send is retried with growing gaps, but only for this long:
@@ -9322,8 +9284,6 @@ def drain_gateway(state, inbox, channels):
             author = _who(m)
             own = author.get("id") == BOT_ID
             if not own:
-                TM.count("messages_seen",
-                         int(m.get("type", 0) in CONVERSATION_TYPES))
                 if not dm_sender_allowed(author):
                     note_dm_refused(m)
                     continue
@@ -9862,7 +9822,6 @@ def outbox_waiting(since):
 def main():
     global CHANNELS, GUILDS, _FORCE_DISCOVERY
     _acquire_singleton()
-    TM.start()
     touch_heartbeat()
     # Identity first, discovery second: the watchdog's health check waits
     # for the identity marker, and full discovery (a probe per channel
@@ -10163,7 +10122,6 @@ def main():
             if cycle_done:
                 flush_join_notices(state, GUILDS, CHANNELS)
                 announce_update(state)
-                telemetry_notice()
                 expire_holds(state)
                 sweep_media()
                 sweep_generated()
@@ -10173,7 +10131,6 @@ def main():
         except Exception as e:
             print(f"Cleanup error: {e}", flush=True)
 
-        TM.tick(settings, GUILDS, _MEMBER_COUNTS)  # never raises
         # Event-driven wait: a gateway MESSAGE_CREATE wakes the loop at
         # once. Otherwise it idles in ticks of at most 2s, shorter while
         # REST slices are due (none while they are behind), a burst is
@@ -10213,5 +10170,4 @@ if __name__ == "__main__":
     try:
         main()
     except BaseException as e:
-        TM.crashed(e)  # its class name only; SystemExit is not a crash
         raise

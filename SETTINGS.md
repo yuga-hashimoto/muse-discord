@@ -89,7 +89,6 @@ the newest change at that place with everything made together with it
 | Replies per day / per person per day (a reminder or watch coming due counts as a reply) | `limits.per_day`, `limits.per_person_per_day` | a number, `none` |
 | Images and video | `media.enabled`, `media.who`, `media.per_day` | on/off; `owners`, `everyone`, ids; a number, `none` |
 | Status line, update notices (`defaults`) | `presence.status`, `updates.notify` | text up to 128; on/off |
-| Anonymous usage stats (`defaults`; `bin/telemetry.py show` prints a report) | `telemetry.usage_stats` | on/off |
 | Save what you tell it in your DM to your Muse's memory (`defaults`) | `memory.save_dms` | on/off |
 | Who can set reminders and watches (web watches: owners only, from a DM) | `abilities.reminders` | `everyone`, `owners`, or ids / `role:<id>` |
 | Reaching out on its own (off by default): check-ins with the owner and people who DMed it first (`dms`), quiet channels (a server or channel; `defaults` = all servers) | `proactive.enabled` | on/off |

@@ -3,7 +3,7 @@
 its own now and then, like a person would, instead of only replying.
 
 Off by default (proactive.enabled; the Friends preset turns it on for
-its server). monitor.py loads this module (like telemetry.py) and calls
+its server). monitor.py loads this module  and calls
 in at a few points; everything else is here:
 
 - tick(state): the main loop. A heartbeat at jittered times

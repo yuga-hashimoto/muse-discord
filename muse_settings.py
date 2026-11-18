@@ -293,13 +293,12 @@ TOP = {
                              discord_editable=False),
     "updates.notify": Spec("on-off", True, "E"),
     # Anonymous daily usage counts to the maintainer (telemetry.py).
-    "telemetry.usage_stats": Spec("on-off", True, "E"),
     # What an owner tells the bot in their DM, added to the Muse's own
     # memory file (monitor.py, remember_facts).
     "memory.save_dms": Spec("on-off", True, "E"),
 }
 TOP_DISCORD_EDITABLE = ("presence.status", "presence.kind",
-                        "updates.notify", "telemetry.usage_stats",
+                        "updates.notify",
                         "memory.save_dms")
 
 
@@ -871,8 +870,6 @@ def map_old(raw, manifests):
     if (raw.get("updates") or {}).get("check") is False:
         put(out, "updates.notify", "off")
         lines.append("updates.check: false -> updates.notify: off")
-    if (raw.get("telemetry") or {}).get("usage_stats") in (False, "off"):
-        put(out, "telemetry.usage_stats", "off")
     if (raw.get("memory") or {}).get("save_dms") in (False, "off"):
         put(out, "memory.save_dms", "off")
     for name, block in (raw.get("plugins") or {}).items():
@@ -1825,7 +1822,7 @@ def _parse_new(p, data, aliases, st):
                 if isinstance(tf, list) else tf.strip()
     for sect, keys in (("presence", ("status", "kind", "enabled")),
                        ("updates", ("notify",)),
-                       ("telemetry", ("usage_stats",)),
+
                        ("memory", ("save_dms",))):
         block = data.get(sect)
         if block is None:
@@ -3033,7 +3030,6 @@ LABELS = {
     "presence.status": "Status line",
     "presence.kind": "Status kind",
     "updates.notify": "Update notices",
-    "telemetry.usage_stats": "Anonymous usage stats",
     "memory.save_dms": "Save what you tell it in DMs to your Muse's memory",
 }
 VALUE_LABELS = {

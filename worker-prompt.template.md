@@ -409,7 +409,6 @@ SETTINGS REQUESTS (the owner's own DMs only):
     (`owners`, `everyone`, ids), `media.per_day` (a number, `none`).
   - Status line, update notices (defaults only): `presence.status`
     (text up to 128), `updates.notify` (on, off).
-  - Anonymous usage stats sent to the muse-discord maintainer (defaults only): `telemetry.usage_stats`
     (on, off).
   - Save what the owner tells you in DMs to your Muse's memory
     (defaults only): `memory.save_dms` (on, off).
