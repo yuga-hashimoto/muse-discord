@@ -4361,18 +4361,6 @@ def bot_is_in_thread(state, channel_id):
     return False
 
 
-def mentions_someone_else(msg):
-    """True when the message @mentions anyone but the bot: it is addressed
-    to them, so an unmentioned free reply must stay out of it (the same
-    rule Hermes' Discord plugin uses)."""
-    me = str(BOT_USER_ID or "")
-    for mention in msg.get("mentions") or []:
-        uid = str((mention or {}).get("id") or "")
-        if uid and uid != me:
-            return True
-    return False
-
-
 def free_reply(msg, replies, author, state=None):
     """True when a message that addresses nobody is still a candidate.
 
@@ -4507,8 +4495,13 @@ def trigger_verdict(msg, guild_id=None, state=None):
                       if direct else None)
     if is_bot_author(author) and here["who.bots"] == "ignore":
         return None, "who.bots: ignore" if direct else None
-    if not direct and mentions_someone_else(msg):
+    if not direct and addresses_someone_else(msg):
         # "@someone else ..." is not for the bot, even in its own thread.
+        # follow_up_open() is what closes the window on it; calling it here
+        # keeps that side effect (a bare message after it is not a
+        # follow-up either).
+        if state is not None:
+            follow_up_open(state, msg)
         return None, None
     if direct:
         kind = "mention"
