@@ -427,6 +427,10 @@ class FreeReplies(unittest.TestCase):
     def threaded(self):
         mod = load()
         mod.CHANNELS["T1"] = dict(THREAD_ITEM)
+        # The bot is already part of the thread (it spoke there).
+        st = mod.load_state()
+        mod.record_history(st, "T1", [H.msg("T1", "999", "hi", bot=True, age=5)])
+        mod.tstate = st
         return mod
 
     def said(self, cid, uid="222", bot=False):
@@ -437,7 +441,17 @@ class FreeReplies(unittest.TestCase):
     def test_a_thread_message_reaches_the_worker(self):
         mod = self.threaded()
         m = self.said("T1")
-        self.assertTrue(mod.free_reply(m, "conversational", m["author"]))
+        self.assertTrue(mod.free_reply(m, "conversational", m["author"],
+                                       mod.tstate))
+
+    def test_a_thread_the_bot_never_joined_stays_quiet(self):
+        mod = load()
+        mod.CHANNELS["T2"] = dict(THREAD_ITEM)
+        m = self.said("T2")
+        self.assertFalse(mod.free_reply(m, "conversational", m["author"],
+                                        mod.load_state()))
+        self.assertFalse(mod.free_reply(m, "free", m["author"],
+                                        mod.load_state()))
         self.assertEqual(mod.trigger_verdict(m, G1, None)[0], "free")
 
     def test_when_addressed_keeps_a_thread_quiet(self):
@@ -568,6 +582,9 @@ class FreeGate(unittest.TestCase):
         self.mod.CHANNELS["T1"] = dict(THREAD_ITEM)
         self.st = self.mod.load_state()
         self.st["guild_joined"] = {G1: 0}
+        # the bot is already part of the thread
+        self.mod.record_history(self.st, "T1",
+                                [H.msg("T1", "999", "hi", bot=True, age=1800)])
 
     def said(self, text="and then?", uid="222", bot=False):
         return {"id": sf(), "channel_id": "T1", "guild_id": G1,

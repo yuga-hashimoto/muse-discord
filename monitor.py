@@ -4341,7 +4341,26 @@ def addresses_bot(msg):
         or ("reply_to_bot" in RESPOND_TO and is_reply_to_bot(msg))
 
 
-def free_reply(msg, replies, author):
+def bot_is_in_thread(state, channel_id):
+    """Whether the bot is already part of this thread: it made it, or it
+    has spoken in it (its own messages are in the history). A thread it
+    never joined is somebody else's conversation."""
+    channel_id = str(channel_id or "")
+    if state is None:
+        return True   # no state to judge by (tests, odd callers): as before
+    if channel_id in _NEW_THREADS:
+        return True
+    for known in _REPLY_THREADS.values():
+        if channel_id in known.values():
+            return True
+    if state is not None:
+        for entry in (state.get("history") or {}).get(channel_id) or []:
+            if entry.get("bot"):
+                return True
+    return False
+
+
+def free_reply(msg, replies, author, state=None):
     """True when a message that addresses nobody is still a candidate.
 
     Two ways: the place is set to who.replies: free (a member answers
@@ -4359,10 +4378,13 @@ def free_reply(msg, replies, author):
         # Nobody @mentioned the bot in it: opening a post is not talking
         # to it. The conversation after it is free, as in any thread.
         return False
-    if replies == "free":
-        return True
     info = CHANNELS.get(channel_id) or {}
-    return bool(info.get("thread")) and replies == "conversational"
+    if info.get("thread"):
+        # A thread is free only where the bot is already in the
+        # conversation; threads it never joined need a mention.
+        return (replies in ("conversational", "free")
+                and bot_is_in_thread(state, channel_id))
+    return replies == "free"
 
 
 _FREE_WAKES = {}   # channel id -> wake times in the last minute
@@ -4480,7 +4502,7 @@ def trigger_verdict(msg, guild_id=None, state=None):
         # bot is already in, so it keeps follow-up semantics even in a
         # thread (where it would otherwise be a free message).
         kind = "follow_up"
-    elif free_reply(msg, replies, author):
+    elif free_reply(msg, replies, author, state):
         # Nobody was addressed, but this is a conversation the bot is in.
         # A cheap gate decides whether it is worth a wake at all; the
         # worker still decides whether to answer (FREEDOM in its prompt).
