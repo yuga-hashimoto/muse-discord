@@ -39,7 +39,10 @@ def build(tmp, command):
 
 
 def run(pkg, *args):
-    env = dict(os.environ, MUSE_DISCORD_CONFIG=os.path.join(pkg, "config.yaml"))
+    # No .pyc writes: several suites run in parallel, and a torn bytecode
+    # file makes an import fail with a misleading "No module named yaml".
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1",
+               MUSE_DISCORD_CONFIG=os.path.join(pkg, "config.yaml"))
     return subprocess.run(
         [sys.executable, os.path.join(pkg, "bin", "transcribe.py")] + list(args),
         env=env, capture_output=True, text=True, timeout=120)
